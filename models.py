@@ -110,6 +110,11 @@ class Segmenter(BaseModel):
             torch.sum((target == label).type_as(p), dim=1)
             for label in range(self.n_classes)
         ])
+        print(
+            intersection.shape, sum_pred.shape, sum_target.shape,
+            p.shape, t.shape, predicted.shape, target.shape
+
+        )
         dsc_k = torch.mean(intersection / (sum_pred + sum_target), dim=0)
         dsc_k = dsc_k[torch.logical_not(torch.isnan(dsc_k))]
         if len(dsc_k) > 0:
