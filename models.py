@@ -59,6 +59,93 @@ class Classifier(BaseModel):
     def forward(self, *inputs):
         return None
 
+
+class Segmenter(BaseModel):
+    def __init__(self, n_outputs):
+        super().__init__()
+        self.n_classes = n_outputs
+
+        self.train_functions = [
+            {
+                'name': 'xentropy',
+                'weight': 1,
+                'f': F.cross_entropy
+            }
+        ]
+
+        self.val_functions = [
+            {
+                'name': 'xent',
+                'weight': 0,
+                'f': F.cross_entropy
+            },
+
+            {
+                'name': 'dsc',
+                'weight': 1,
+                'f': self._dsc_loss
+            },
+            {
+                'name': 'mIoU',
+                'weight': 0,
+                'f': self._mean_iou
+            },
+        ]
+
+    def _dsc_loss(self, predicted, target):
+        p = torch.flatten(torch.argmax(predicted, dim=1), start_dim=1)
+        t = torch.flatten(target, start_dim=1).to(predicted.device)
+        intersection = torch.stack([
+            2 * torch.sum(
+                (p == label).type_as(p) * (t == label).type_as(p),
+                dim=1
+            )
+            for label in self.n_classes
+        ])
+        sum_pred = torch.stack([
+            torch.sum((p == label).type_as(p), dim=1)
+            for label in self.n_classes
+        ])
+        sum_target = torch.stack([
+            torch.sum((target == label).type_as(p), dim=1)
+            for label in self.n_classes
+        ])
+        dsc_k = torch.mean(intersection / (sum_pred + sum_target), dim=0)
+        dsc_k = dsc_k[torch.logical_not(torch.isnan(dsc_k))]
+        if len(dsc_k) > 0:
+            dsc = 1 - torch.mean(dsc_k)
+        else:
+            dsc = torch.mean(0. * p)
+
+        return torch.clamp(dsc, 0., 1.)
+
+    def _mean_iou(self, predicted, target):
+        p = torch.flatten(torch.argmax(predicted, dim=1), start_dim=1)
+        t = torch.flatten(target, start_dim=1).to(predicted.device)
+        intersection = torch.stack([
+            2 * torch.sum(
+                (p == label).type_as(p) * (t == label).type_as(p),
+                dim=1
+            )
+            for label in self.n_classes
+        ])
+        union = torch.stack([
+            torch.sum(torch.logical_or(p == label, target == label).type_as(p), dim=1)
+            for label in self.n_classes
+        ])
+        miou_k = torch.mean(intersection / union, dim=0)
+        miou_k = miou_k[torch.logical_not(torch.isnan(miou_k))]
+        if len(miou_k) > 0:
+            miou = 1 - torch.mean(miou_k)
+        else:
+            miou = torch.mean(0. * p)
+
+        return torch.clamp(miou, 0., 1.)
+
+    def forward(self, *inputs):
+        return None
+
+
 class ConvNeXtTiny(Classifier):
     def __init__(
         self, n_outputs, pretrained=False, lr=1e-3,
@@ -85,7 +172,7 @@ class ConvNeXtTiny(Classifier):
         # <Optimizer setup>
         # We do this last step after all parameters are defined
         model_params = filter(lambda p: p.requires_grad, self.parameters())
-        self.optimizer_alg = torch.optim.SGD(model_params, lr=self.lr)
+        self.optimizer_alg = torch.optim.Adam(model_params, lr=self.lr)
         if verbose > 1:
             print(
                 'Network created on device {:} with training losses '
@@ -128,7 +215,7 @@ class ResNet18(Classifier):
         # <Optimizer setup>
         # We do this last step after all parameters are defined
         model_params = filter(lambda p: p.requires_grad, self.parameters())
-        self.optimizer_alg = torch.optim.SGD(model_params, lr=self.lr)
+        self.optimizer_alg = torch.optim.Adam(model_params, lr=self.lr)
         if verbose > 1:
             print(
                 'Network created on device {:} with training losses '
@@ -171,7 +258,7 @@ class ResNet101(Classifier):
         # <Optimizer setup>
         # We do this last step after all parameters are defined
         model_params = filter(lambda p: p.requires_grad, self.parameters())
-        self.optimizer_alg = torch.optim.SGD(model_params, lr=self.lr)
+        self.optimizer_alg = torch.optim.Adam(model_params, lr=self.lr)
         if verbose > 1:
             print(
                 'Network created on device {:} with training losses '
@@ -290,7 +377,7 @@ class ViT_B_16(Classifier):
         # <Optimizer setup>
         # We do this last step after all parameters are defined
         model_params = filter(lambda p: p.requires_grad, self.parameters())
-        self.optimizer_alg = torch.optim.SGD(model_params, lr=self.lr)
+        self.optimizer_alg = torch.optim.Adam(model_params, lr=self.lr)
         if verbose > 1:
             print(
                 'Network created on device {:} with training losses '
@@ -309,9 +396,62 @@ class ViT_B_16(Classifier):
         return self.vit.conv_proj
 
 
-def vitb_cifar(n_outputs, lr=1e-3, pretrained=False):
-    return ViT_B_16(32, n_outputs, pretrained, lr=lr)
+class FCN_ResNet50(Classifier):
+    def __init__(
+        self, n_inputs, n_outputs, pretrained=False, lr=1e-3,
+        device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
+        verbose=True
+    ):
+        super().__init__(n_outputs)
+        # Init
+        self.channels = n_inputs
+        self.lr = lr
+        self.device = device
+        if pretrained:
+            try:
+                weights = models.segmentation.FCN_ResNet50_Weights.DEFAULT
+                self.fcn = models.segmentation.fcn_resnet50(weights=weights)
+            except TypeError:
+                self.fcn = models.segmentation.fcn_resnet50(pretrained)
+        else:
+            self.fcn = models.segmentation.fcn_resnet50
+        if n_inputs > 3:
+            conv_input = nn.Conv2d(
+                n_inputs, 64, kernel_size=7, stride=2, padding=3, bias=False
+            )
+            # We assume that RGB channels will be the first 3
+            conv_input.weight.data[:, :3, ...].copy_(self.fcn.backbone.conv1.weight.data)
+            self.fcn.backbone.conv1 = conv_input
+        elif n_inputs < 3:
+            self.fcn.backbone.conv1 = nn.Conv2d(
+                n_inputs, 64, kernel_size=7, stride=2, padding=3, bias=False
+            )
+        self.last_features = self.fcn.classifier[-1].in_features
+        self.fcn.classifier[-1] = nn.Conv2d(
+            self.last_features, 2, kernel_size=1, stride=1
+        )
+        self.aux_last_features = self.fcn.aux_classifier[-1].in_features
+        self.fcn.aux_classifier[-1] = nn.Conv2d(
+            self.aux_last_features, 2, kernel_size=1, stride=1
+        )
 
+        # <Optimizer setup>
+        # We do this last step after all parameters are defined
+        model_params = filter(lambda p: p.requires_grad, self.parameters())
+        self.optimizer_alg = torch.optim.Adam(model_params, lr=self.lr)
+        if verbose > 1:
+            print(
+                'Network created on device {:} with training losses '
+                '[{:}] and validation losses [{:}]'.format(
+                    self.device,
+                    ', '.join([tf['name'] for tf in self.train_functions]),
+                    ', '.join([vf['name'] for vf in self.val_functions])
+                )
+            )
 
-def vitb_imagenet(n_outputs, lr=1e-3, pretrained=False):
-    return ViT_B_16(64, n_outputs, pretrained, lr=lr)
+    def forward(self, data):
+        self.fcn.to(self.device)
+        return self.fcn(data)
+
+    def target_layer(self):
+        return self.fcn.backbone
