@@ -395,7 +395,10 @@ class LythrumDataset(Dataset):
         else:
             self.mosaic = mosaic
         self.mask = mask
-        self.patches = get_slices([mask], patch_size, patch_size // 2)[0]
+        self.patches = get_slices(
+            [mask], (patch_size, patch_size),
+            (patch_size // 2, patch_size // 2)
+        )[0]
 
     def __getitem__(self, index):
         patch = self.patches[index]
@@ -421,7 +424,10 @@ class BalancedLythrumDataset(Dataset):
         else:
             self.mosaic = mosaic
         self.mask = mask
-        patches = get_slices([mask], patch_size, patch_size // 2)[0]
+        patches = get_slices(
+            [mask], (patch_size, patch_size),
+            (patch_size // 2, patch_size // 2)
+        )[0]
 
         patch_slices = [s for s in patches if np.sum(mask[s]) > 0]
         bck_slices = [s for s in patches if np.sum(mask[s]) == 0]
