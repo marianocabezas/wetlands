@@ -453,7 +453,7 @@ class FCN_ResNet50(Segmenter):
 
     def forward(self, data):
         self.fcn.to(self.device)
-        return self.fcn(data)
+        return self.fcn(data)['out']
 
     def target_layer(self):
         return self.fcn.backbone
