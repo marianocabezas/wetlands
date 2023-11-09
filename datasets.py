@@ -1,4 +1,5 @@
 import os
+import itertools
 import xmltodict
 import numpy as np
 from copy import deepcopy
