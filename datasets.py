@@ -1,558 +1,287 @@
 import os
-import time
-import itertools
-from copy import deepcopy
+import xmltodict
 import numpy as np
-import nibabel as nib
+from copy import deepcopy
+from itertools import product
+import xml.etree.ElementTree as et
+from skimage import io as skio
+from skimage.util.shape import view_as_blocks
 from torch.utils.data.dataset import Dataset
-from utils import get_bb, find_file, time_to_string
 
 
 ''' Utility function for patch creation '''
 
 
-def centers_to_slice(voxels, patch_half):
-    """
-    Function to convert a list of indices defining the center of a patch, to
-    a real patch defined using slice objects for each dimension.
-    :param voxels: List of indices to the center of the slice.
-    :param patch_half: List of integer halves (//) of the patch_size.
-    """
-    slices = [
-        tuple(
-            [
-                slice(idx - p_len, idx + p_len) for idx, p_len in zip(
-                    voxel, patch_half
-                )
-            ]
-        ) for voxel in voxels
-    ]
-    return slices
-
-
-def get_slices(masks, patch_size, overlap):
-    """
-    Function to get all the patches with a given patch size and overlap between
-    consecutive patches from a given list of masks. We will only take patches
-    inside the bounding box of the mask. We could probably just pass the shape
-    because the masks should already be the bounding box.
-    :param masks: List of masks.
-    :param patch_size: Size of the patches.
-    :param overlap: Overlap on each dimension between consecutive patches.
-
-    """
-    # Init
-    # We will compute some intermediate stuff for later.
-    patch_half = [p_length // 2 for p_length in patch_size]
-    steps = [max(p_length - o, 1) for p_length, o in zip(patch_size, overlap)]
-
-    # We will need to define the min and max pixel indices. We define the
-    # centers for each patch, so the min and max should be defined by the
-    # patch halves.
-    min_bb = [patch_half] * len(masks)
-    max_bb = [
-        [
-            max_i - p_len for max_i, p_len in zip(mask.shape, patch_half)
-        ] for mask in masks
-    ]
-
-    # This is just a "pythonic" but complex way of defining all possible
-    # indices given a min, max and step values for each dimension.
-    dim_ranges = [
-        map(
-            lambda t: np.concatenate([np.arange(*t), [t[1]]]),
-            zip(min_bb_i, max_bb_i, steps)
-        ) for min_bb_i, max_bb_i in zip(min_bb, max_bb)
-    ]
-
-    # And this is another "pythonic" but not so intuitive way of computing
-    # all possible triplets of center voxel indices given the previous
-    # indices. I also added the slice computation (which makes the last step
-    # of defining the patches).
-    patch_slices = [
-        centers_to_slice(
-            itertools.product(*dim_range), patch_half
-        ) for dim_range in dim_ranges
-    ]
-
-    return patch_slices
-
-
-''' Datasets '''
-
-
-class ImagePatchesDataset(Dataset):
-    def __init__(
-            self, subjects, labels, rois, patch_size=32,
-            overlap=0, balanced=True,
-    ):
-        # Init
-        if type(patch_size) is not tuple:
-            self.patch_size = (patch_size,) * 3
-        else:
-            self.patch_size = patch_size
-        if type(overlap) is not tuple:
-            self.overlap = (overlap,) * 3
-        else:
-            self.overlap = overlap
-        self.balanced = balanced
-
-        self.subjects = subjects
-        self.rois = rois
-        self.labels = labels
-
-        # We get the preliminary patch slices (inside the bounding box)...
-        slices = get_slices(self.rois, self.patch_size, self.overlap)
-
-        # ... however, being inside the bounding box doesn't guarantee that the
-        # patch itself will contain any lesion voxels. Since, the lesion class
-        # is extremely underrepresented, we will filter this preliminary slices
-        # to guarantee that we only keep the ones that contain at least one
-        # lesion voxel.
-        patch_slices = [
-            (s, i) for i, (label, s_i) in enumerate(
-                zip(labels, slices)
-            )
-            for s in s_i if np.sum(label[s]) > 0
-        ]
-        bck_slices = [
-            (s, i) for i, (label, s_i) in enumerate(
-                zip(labels, slices)
-            )
-            for s in s_i if np.sum(label[s]) == 0
-        ]
-        n_positives = len(patch_slices)
-        n_negatives = len(bck_slices)
-
-        positive_imbalance = n_positives > n_negatives
-
-        if positive_imbalance:
-            self.majority = patch_slices
-            self.majority_label = np.array([1], dtype=np.uint8)
-
-            self.minority = bck_slices
-            self.minority_label = np.array([0], dtype=np.uint8)
-        else:
-            self.majority = bck_slices
-            self.majority_label = np.array([0], dtype=np.uint8)
-
-            self.minority = patch_slices
-            self.minority_label = np.array([1], dtype=np.uint8)
-
-        if self.balanced:
-            self.current_majority = deepcopy(self.majority)
-            self.current_minority = deepcopy(self.minority)
-
-    def __getitem__(self, index):
-        if self.balanced:
-            if index < (2 * len(self.minority)):
-                flip = index >= len(self.minority)
-                index = np.random.randint(len(self.current_minority))
-                slice_i, case_idx = self.current_minority.pop(index)
-                if len(self.current_minority) == 0:
-                    self.current_minority = deepcopy(self.minority)
-                target_data = self.minority_label
-            else:
-                flip = (index - 2 * len(self.minority)) >= len(self.majority)
-                index = np.random.randint(len(self.current_majority))
-                slice_i, case_idx = self.current_majority.pop(index)
-                if len(self.current_majority) == 0:
-                    self.current_majority = deepcopy(self.majority)
-                target_data = self.majority_label
-        else:
-            flip = False
-            if index < len(self.minority):
-                slice_i, case_idx = self.minority[index]
-                target_data = self.minority_label
-            else:
-                index -= len(self.minority)
-                slice_i, case_idx = self.majority[index]
-                target_data = self.majority_label
-
-        data = self.subjects[case_idx]
-        none_slice = (slice(None, None),)
-        # Patch "extraction".
-        if isinstance(data, tuple):
-            data = tuple(
-                data_i[none_slice + slice_i].astype(np.float32)
-                for data_i in data
-            )
-        else:
-            data = data[none_slice + slice_i].astype(np.float32)
-        if flip:
-            if isinstance(data, tuple):
-                data = tuple(
-                    np.fliplr(data_i).copy() for data_i in data
-                )
-            else:
-                data = np.fliplr(data).copy()
-
-        return data, target_data
-
-    def __len__(self):
-        if self.balanced:
-            return len(self.minority) * 4
-        else:
-            return len(self.minority) + len(self.majority)
-
-
-class ImageCroppingDataset(Dataset):
-    def __init__(
-            self, subjects, labels, rois, patch_size=32,
-            overlap=0, filtered=True, balanced=True,
-    ):
-        # Init
-        if type(patch_size) is not tuple:
-            self.patch_size = (patch_size,) * 3
-        else:
-            self.patch_size = patch_size
-        if type(overlap) is not tuple:
-            self.overlap = (overlap,) * 3
-        else:
-            self.overlap = overlap
-        self.filtered = filtered
-        self.balanced = balanced
-
-        self.subjects = subjects
-        self.rois = rois
-        self.labels = labels
-
-        # We get the preliminary patch slices (inside the bounding box)...
-        slices = get_slices(self.rois, self.patch_size, self.overlap)
-
-        # ... however, being inside the bounding box doesn't guarantee that the
-        # patch itself will contain any lesion voxels. Since, the lesion class
-        # is extremely underrepresented, we will filter this preliminary slices
-        # to guarantee that we only keep the ones that contain at least one
-        # lesion voxel.
-        if self.filtered:
-            if self.balanced:
-                self.patch_slices = [
-                    (s, i) for i, (label, s_i) in enumerate(
-                        zip(labels, slices)
-                    )
-                    for s in s_i if np.sum(label[s]) > 0
-                ]
-                self.bck_slices = [
-                    (s, i) for i, (label, s_i) in enumerate(
-                        zip(labels, slices)
-                    )
-                    for s in s_i if np.sum(label[s]) == 0
-                ]
-                self.current_bck = deepcopy(self.bck_slices)
-            else:
-                self.patch_slices = [
-                    (s, i) for i, (label, s_i) in enumerate(
-                        zip(labels, slices)
-                    )
-                    for s in s_i if np.sum(label[s]) > 0
-                ]
-        else:
-            self.patch_slices = [
-                (s, i) for i, s_i in enumerate(slices) for s in s_i
-            ]
-
-    def __getitem__(self, index):
-        if index < (2 * len(self.patch_slices)):
-            flip = index >= len(self.patch_slices)
-            if flip:
-                index -= len(self.patch_slices)
-            slice_i, case_idx = self.patch_slices[index]
-            positive = True
-        else:
-            flip = np.random.random() > 0.5
-            index = np.random.randint(len(self.current_bck))
-            slice_i, case_idx = self.current_bck.pop(index)
-            if len(self.current_bck) == 0:
-                self.current_bck = deepcopy(self.bck_slices)
-            positive = False
-
-        data = self.subjects[case_idx]
-        if self.labels is None:
-            labels = positive
-        else:
-            labels = self.labels[case_idx]
-        none_slice = (slice(None, None),)
-        # Patch "extraction".
-        if isinstance(data, tuple):
-            data = tuple(
-                data_i[none_slice + slice_i].astype(np.float32)
-                for data_i in data
-            )
-        else:
-            data = data[none_slice + slice_i].astype(np.float32)
-        target_data = np.expand_dims(labels[slice_i].astype(np.uint8), axis=0)
-        if flip:
-            if isinstance(data, tuple):
-                data = tuple(
-                    np.fliplr(data_i).copy() for data_i in data
-                )
-            else:
-                data = np.fliplr(data).copy()
-            target_data = np.fliplr(target_data).copy()
-
-        return data, target_data
-
-    def __len__(self):
-        if self.filtered and self.balanced:
-            return len(self.patch_slices) * 4
-        else:
-            return len(self.patch_slices)
-
-
-class ImageDataset(Dataset):
-    def __init__(
-        self, subjects, labels, rois
-    ):
-        # Init
-        self.subjects = subjects
-        self.rois = rois
-        self.labels = labels
-
-    def __getitem__(self, index):
-        flip = index >= len(self.labels)
-        if flip:
-            index -= len(self.labels)
-
-        data = self.subjects[index]
-        labels = self.labels[index]
-        none_slice = (slice(None, None),)
-        bb = get_bb(self.rois[index], 1)
-        # Patch "extraction".
-        if isinstance(data, tuple):
-            data = tuple(
-                data_i[none_slice + bb].astype(np.float32)
-                for data_i in data
-            )
-        else:
-            data = data[none_slice + bb].astype(np.float32)
-        target_data = np.expand_dims(labels[bb].astype(np.uint8), axis=0)
-        if flip:
-            if isinstance(data, tuple):
-                data = tuple(
-                    np.fliplr(data_i).copy() for data_i in data
-                )
-            else:
-                data = np.fliplr(data).copy()
-            target_data = np.fliplr(target_data).copy()
-
-        return data, target_data
-
-    def __len__(self):
-        return len(self.labels) * 2
-
-
-class BinaryImageDataset(Dataset):
-    """
-    This is a training dataset and we only want patches that
-    actually have lesions since there are lots of non-lesion voxels
-    anyways.
-    """
-    def __init__(self, cases, labels, rois):
-        # Init
-        self.labels = labels
-        self.cases = cases
-        self.rois = rois
-
-        self.positive_cases = [
-            case for case, label in enumerate(labels) if label
-        ]
-        self.negative_cases = [
-            case for case, label in enumerate(labels) if not label
-        ]
-
-        self.positive = True
-        self.current_positive = deepcopy(self.positive_cases)
-        self.current_negative = deepcopy(self.negative_cases)
-
-        print(
-            'Balanced dataset', 'Positives', len(self.positive_cases),
-            'Negatives', len(self.negative_cases),
-        )
-
-    def __getitem__(self, index):
-        if self.positive:
-            index = np.random.randint(len(self.current_positive))
-            index = self.current_positive.pop(index)
-            if len(self.current_positive) == 0:
-                self.current_positive = deepcopy(self.positive_cases)
-            data = self.cases[index].astype(np.float32)
-            target = np.array([1], dtype=np.uint8)
-
-            self.positive = False
-        else:
-            index = np.random.randint(len(self.current_negative))
-            index = self.current_negative.pop(index)
-            if len(self.current_negative) == 0:
-                self.current_negative = deepcopy(self.negative_cases)
-            data = self.cases[index].astype(np.float32)
-            target = np.array([0], dtype=np.uint8)
-
-            self.positive = True
-
-        # bb = get_bb(self.masks[index])
-        # data = self.cases[index][(slice(None),) + bb].astype(np.float32)
-
-        return data, target
-
-    def __len__(self):
-        return len(self.positive_cases) + len(self.negative_cases)
-
-
-class NaturalDataset(Dataset):
+class RumexDataset(Dataset):
     """
     Dataset that uses a preloaded tensor with natural images, including
     classification labels.
     """
-    def __init__(self, data, labels):
-        self.data = data
-        self.labels = labels
+    def __init__(self, path, basenames, patch_size, norm=True):
+        patch_list = []
+        alpha_list = []
+        label_list = []
+        for base_filename in basenames:
+            # parse xml file of 'base_filename' and get image metadata info
+            quadrant = base_filename.split("_")[-1]
+            imfile = base_filename + '.png'
+            xmlfile = base_filename + '.xml'
+            root = et.parse(os.path.join(path, xmlfile)).getroot()
+            xmlstr = et.tostring(root, encoding='utf-8', method='xml')
+            xmldict = dict(xmltodict.parse(xmlstr))
 
-    def __getitem__(self, index):
-        x = self.data[index]
-        width = int(np.sqrt(len(x) / 3))
-        x = x.view(3, width, width)
-        y = self.labels[index]
+            # actual image size
+            im_size = xmldict['annotation']['size']
+            im_height = int(im_size['height'])
+            im_width = int(im_size['width'])
 
-        return x, y
+            # crop image to be a multiple of patch_size
+            npatches_w = im_width // patch_size
+            npatches_h = im_height // patch_size
+            im = skio.imread(os.path.join(path, imfile))
 
-    def __len__(self):
-        return len(self.data)
+            # split image into patches
+            ### create labels for each patch: rumex, other or outside ###
+            # step 1: get rumex bbox from xml file
+            # step 2: if bbox overlaps with image patch label it as rumex
+            # Note: use mask to determine if the patches are within or outside
+            # field
 
-
-class MultiDataset(Dataset):
-    """
-    Dataset that combines multiple datasets into one.
-    """
-
-    def __init__(self, datasets):
-        self.datasets = datasets
-        self.lengths = np.cumsum([len(d) for d in self.datasets])
-
-    def __getitem__(self, index):
-        set_index = np.min(np.where(self.lengths > index))
-        lengths = [0] + self.lengths.tolist()
-        true_index = index - lengths[set_index]
-        return self.datasets[set_index][true_index]
-
-    def __len__(self):
-        return self.lengths[-1]
-
-
-class DiffusionDataset(Dataset):
-    def __init__(
-            self, dmri, rois, directions, bvalues, patch_size=32,
-            overlap=0, min_lr=22, max_lr=22
-    ):
-        # Init
-        if type(patch_size) is not tuple:
-            self.patch_size = (patch_size,) * 3
-        else:
-            self.patch_size = patch_size
-        if type(overlap) is not tuple:
-            self.overlap = (overlap,) * 3
-        else:
-            self.overlap = overlap
-
-        self.images = dmri
-        self.rois = rois
-        self.directions = directions
-        self.bvalues = bvalues
-        n_directions = [len(bvalue) > 7 for bvalue in self.bvalues]
-        assert np.all(n_directions), 'The inputs are already low resolution'
-        if min_lr < 7:
-            self.min_lr = 7
-        else:
-            self.min_lr = min_lr
-        if max_lr < self.min_lr:
-            self.max_lr = self.min_lr
-        else:
-            self.max_lr = max_lr
-
-        # We get the preliminary patch slices (inside the bounding box)...
-        slices = get_slices(self.rois, self.patch_size, self.overlap)
-
-        # ... however, being inside the bounding box doesn't guarantee that the
-        # patch itself will contain any lesion voxels. Since, the lesion class
-        # is extremely underrepresented, we will filter this preliminary slices
-        # to guarantee that we only keep the ones that contain at least one
-        # lesion voxel.
-        self.patch_slices = [
-            (s, i) for i, s_i in enumerate(slices) for s in s_i
-        ]
-
-    def __getitem__(self, index):
-        slice_i, case_idx = self.patch_slices[index]
-        none_slice = (slice(None),)
-
-        dmri = self.images[case_idx][none_slice + slice_i].astype(np.float32)
-        dirs = self.directions[case_idx].transpose().astype(np.float32)
-        bvalues = self.bvalues[case_idx].astype(np.float32)
-        if self.min_lr == self.max_lr:
-            lr_end = self.min_lr
-        else:
-            lr_end = np.random.randint(self.min_lr, self.max_lr, 1)
-
-        hr_dmri = np.expand_dims(dmri, axis=0)
-        hr_dir = np.broadcast_to(
-            np.expand_dims(dirs, axis=(2, 3, 4)),
-            dirs.shape + hr_dmri.shape[2:]
-        )
-        hr_bvalues = np.broadcast_to(
-            np.expand_dims(bvalues, axis=(2, 3, 4)),
-            bvalues.shape + hr_dmri.shape[2:]
-        )
-        hr_data = np.concatenate([hr_bvalues, hr_dir, hr_dmri])
-        input_data = hr_data[:lr_end, ...]
-        target_data = hr_data[lr_end:, ...]
-
-        return input_data, target_data
-
-    def __len__(self):
-        return len(self.patch_slices)
-
-
-class CTDataset(Dataset):
-    """
-    Dataset that loads CT images given their encoded label vector.
-    """
-    def __init__(self, path, image_name, subjects, labels, preload=False):
-        self.data = []
-        self.preload = preload
-        load_start = time.time()
-        for i, sub in enumerate(subjects):
-            loads = len(subjects) - i
-            load_elapsed = time.time() - load_start
-            load_eta = loads * load_elapsed / (i + 1)
-            print(
-                '\033[KLoading subject {:} ({:04d}/{:04d}) - '
-                '[{:05.2f}%] {:} ETA {:}'.format(
-                    sub, i + 1, len(subjects),
-                    100 * i / len(subjects),
-                    time_to_string(load_elapsed),
-                    time_to_string(load_eta),
-                ), end='\r'
+            # logic of finding the overlap between patch and ground truth bbox
+            # 1. find the patches that the true rumex bbox straddles:
+            #    eg: bbox[0] // patch_size
+            # 2. label those patches as rumex
+            alpha = im[:npatches_h * patch_size, :npatches_w * patch_size, 3]
+            im = np.moveaxis(
+                im[:npatches_h * patch_size, :npatches_w * patch_size, :3],
+                -1, 0
             )
-            sub_path = os.path.join(path, sub)
-            file_path = find_file(image_name, sub_path)
-            if self.preload:
-                self.data.append(
-                    np.expand_dims(nib.load(file_path).get_fdata(), axis=0)
+            if norm:
+                im_mean = np.mean(im, axis=(1, 2), keepdims=True)
+                im_std = np.std(im, axis=(1, 2), keepdims=True)
+                im_norm = (im - im_mean) / im_std
+                im_norm = im / 255
+                im_patches = np.squeeze(
+                    view_as_blocks(im_norm, (3, patch_size, patch_size))
                 )
             else:
-                self.data.append(file_path)
-        self.labels = labels
+                im_patches = np.squeeze(
+                    view_as_blocks(im, (3, patch_size, patch_size))
+                )
+            alpha_patches = np.squeeze(
+                view_as_blocks(alpha, (patch_size, patch_size))
+            )
+            alpha_mask = np.mean(alpha_patches, axis=(2, 3)).flatten() > 0
+            labels = np.zeros(im_patches.shape[:2])
+
+            objects = xmldict['annotation']['object']
+            nobjects = len(objects)
+            for i in range(nobjects):
+                obj_i = objects[i]
+
+                if obj_i['name'] == 'rumex':
+                    temp = obj_i['bndbox']
+                    bbox = [
+                        int(temp['xmin']), int(temp['ymin']),
+                        int(temp['xmax']), int(temp['ymax'])
+                    ]
+
+                    xmin_r = bbox[0] // patch_size
+                    ymin_r = bbox[1] // patch_size
+                    xmax_r = bbox[2] // patch_size
+                    ymax_r = bbox[3] // patch_size
+
+                    if (xmax_r < npatches_w) & (ymax_r < npatches_h):
+                        if xmax_r - xmin_r >= 1:
+                            x_patches_with_rumex = list(
+                                np.arange(xmin_r, xmax_r + 1)
+                            )
+                        else:
+                            x_patches_with_rumex = [xmin_r]
+
+                        if ymax_r - ymin_r >= 1:
+                            y_patches_with_rumex = list(
+                                np.arange(ymin_r, ymax_r + 1)
+                            )
+                        else:
+                            y_patches_with_rumex = [ymin_r]
+
+                        for col in x_patches_with_rumex:
+                            for row in y_patches_with_rumex:
+                                labels[row, col] = 1
+            patch_list.append(
+                np.reshape(
+                    im_patches, (-1, 3, patch_size, patch_size)
+                )[alpha_mask, ...]
+            )
+            label_list.append(labels.flatten()[alpha_mask])
+        self.data = np.concatenate(patch_list, axis=0)
+        self.labels = np.concatenate(label_list, axis=0)
 
     def __getitem__(self, index):
-        if self.preload:
-            x = self.data[index].astype(np.float32)
-        else:
-            x = np.expand_dims(
-                nib.load(self.data[index]).get_fdata(), axis=0
-            ).astype(np.float32)
-        y = np.array(self.labels[index], dtype=int)
+        x = self.data[index].astype(np.float32)
+        y = self.labels[index].astype(np.uint8)
 
         return x, y
 
     def __len__(self):
         return len(self.data)
+
+
+class BalancedRumexDataset(RumexDataset):
+    """
+    Dataset that uses a preloaded tensor with natural images, including
+    classification labels.
+    """
+    def __init__(self, path, basenames, patch_size, norm=True):
+        super().__init__(path, basenames, patch_size, norm)
+        self.plant = np.where(self.labels.astype(bool))[0]
+        self.background = np.where(np.logical_not(self.labels.astype(bool)))[0]
+        self.current_background = deepcopy(self.background).tolist()
+
+    def __getitem__(self, index):
+        if index < len(self.plant):
+            true_index = self.plant[index]
+        else:
+            random_index = np.random.randint(len(self.current_background))
+            true_index = self.current_background.pop(random_index)
+            if len(self.current_background) == 0:
+                self.current_background = deepcopy(self.background).tolist()
+        return super().__getitem__(true_index)
+
+    def __len__(self):
+        return len(self.plant) * 2
+
+
+class RumexTestDataset(Dataset):
+    """
+    Dataset that uses a preloaded tensor with natural images, including
+    classification labels.
+    """
+    def __init__(self, path, basenames, patch_size, norm=True):
+        self.patch_size = patch_size
+        self.images = []
+        self.patches = []
+        label_list = []
+        for idx_m, base_filename in enumerate(basenames):
+            # parse xml file of 'base_filename' and get image metadata info
+            imfile = base_filename + '.png'
+            xmlfile = base_filename + '.xml'
+            root = et.parse(os.path.join(path, xmlfile)).getroot()
+            xmlstr = et.tostring(root, encoding='utf-8', method='xml')
+            xmldict = dict(xmltodict.parse(xmlstr))
+
+            # actual image size
+            im_size = xmldict['annotation']['size']
+            im_height = int(im_size['height'])
+            im_width = int(im_size['width'])
+
+            # pad the image to be a multiple of patch_size
+            npatches_w = int(np.ceil(im_width / patch_size))
+            npatches_h = int(np.ceil(im_height / patch_size))
+            new_w = npatches_w * patch_size
+            new_h = npatches_h * patch_size
+            pad_w = new_w - im_width
+            pad_h = new_h - im_height
+
+            mosaic = skio.imread(os.path.join(path, imfile))
+            im = mosaic[..., :3]
+            if norm:
+                im_mean = np.mean(im, axis=(1, 2), keepdims=True)
+                im_std = np.std(im, axis=(1, 2), keepdims=True)
+                im_norm = (im - im_mean) / im_std
+                im_norm = im / 255
+                self.images.append(
+                    np.moveaxis(
+                        np.pad(
+                            im_norm,
+                            ((0, pad_h), (0, pad_w), (0, 0))
+                        ), -1, 0
+                    )
+                )
+            else:
+                self.images.append(
+                    np.moveaxis(
+                        np.pad(im, ((0, pad_h), (0, pad_w), (0, 0))), -1, 0
+                    )
+                )
+
+            alpha = np.pad(mosaic[..., 3], ((0, pad_h), (0, pad_w)))
+
+            im_patches = [
+                (
+                    idx_m,
+                    slice(
+                        idx_i * patch_size,
+                        idx_i * patch_size + patch_size
+                    ),
+                    slice(
+                        idx_j * patch_size,
+                        idx_j * patch_size + patch_size
+                    )
+                )
+                for idx_i, idx_j in product(
+                    range(npatches_h), range(npatches_w)
+                )
+            ]
+
+            labels = np.zeros(len(im_patches))
+
+            objects = xmldict['annotation']['object']
+            nobjects = len(objects)
+            for i in range(nobjects):
+                obj_i = objects[i]
+
+                if obj_i['name'] == 'rumex':
+                    temp = obj_i['bndbox']
+                    bbox = [
+                        int(temp['xmin']), int(temp['ymin']),
+                        int(temp['xmax']), int(temp['ymax'])
+                    ]
+
+                    xmin_r = bbox[0] // patch_size
+                    ymin_r = bbox[1] // patch_size
+                    xmax_r = bbox[2] // patch_size
+                    ymax_r = bbox[3] // patch_size
+
+                    if (xmax_r < npatches_w) & (ymax_r < npatches_h):
+                        if xmax_r - xmin_r >= 1:
+                            x_patches_with_rumex = list(
+                                np.arange(xmin_r, xmax_r + 1)
+                            )
+                        else:
+                            x_patches_with_rumex = [xmin_r]
+
+                        if ymax_r - ymin_r >= 1:
+                            y_patches_with_rumex = list(
+                                np.arange(ymin_r, ymax_r + 1)
+                            )
+                        else:
+                            y_patches_with_rumex = [ymin_r]
+
+                        for col in x_patches_with_rumex:
+                            for row in y_patches_with_rumex:
+                                labels[row * npatches_w + col] = 1
+
+            self.patches.extend([
+                (m, x_idx, y_idx) for m, x_idx, y_idx in im_patches
+                if np.mean(alpha[x_idx, y_idx]) > 0
+            ])
+            label_list.append(np.stack([
+                l for (_, x_idx, y_idx), l in zip(im_patches, labels)
+                if np.mean(alpha[x_idx, y_idx]) > 0
+            ]))
+        self.labels = np.concatenate(label_list, axis=0)
+
+    def __getitem__(self, index):
+        m, slice_i, slice_j = self.patches[index]
+        x = self.images[m][:, slice_i, slice_j].astype(np.float32)
+        y = self.labels[index].astype(np.uint8)
+        patch_coords = (
+            (slice_i.start, slice_i.stop),
+            (slice_j.start, slice_j.stop)
+        )
+        return x, y, patch_coords
+
+    def __len__(self):
+        return len(self.patches)
