@@ -404,7 +404,7 @@ class LythrumDataset(Dataset):
     def __getitem__(self, index):
         patch = self.patches[index]
         x = self.mosaic[(slice(None),) + patch].astype(np.float32)
-        y = self.mask[patch].astype(np.int16)
+        y = self.mask[patch].astype(np.int32)
 
         return x, y
 
@@ -459,7 +459,7 @@ class BalancedLythrumDataset(Dataset):
             if len(self.current_majority) == 0:
                 self.current_majority = deepcopy(self.majority)
         x = self.mosaic[(slice(None),) + patch].astype(np.float32)
-        y = self.mask[patch].astype(np.int16)
+        y = self.mask[patch].astype(np.int32)
 
         return x, y
 
