@@ -386,20 +386,6 @@ class BaseModel(nn.Module):
 
         return np_output
 
-    def reset_optimiser(self, model_params=None):
-        """
-        Abstract function to rest the optimizer.
-        :return: Nothing.
-        """
-        self.epoch = 0
-        self.t_train = 0
-        self.t_val = 0
-        self.best_loss_tr = np.inf
-        self.best_loss_val = np.inf
-        self.best_state = None
-        self.best_opt = None
-        return None
-
     def epoch_update(self, epochs, loader):
         """
         Callback function to update something on the model after the epoch
