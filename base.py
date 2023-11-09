@@ -47,29 +47,12 @@ class BaseModel(nn.Module):
         self.train_functions = [
             {'name': 'train', 'weight': 1, 'f': None},
         ]
-        self.train_log = {}
         self.val_functions = [
             {'name': 'val', 'weight': 1, 'f': None},
         ]
-        self.val_log = {}
         self.acc_functions = {}
         self.acc = None
 
-    def update_logs(self):
-        self.train_log = {
-            f['name']: []
-            for f in self.train_functions
-        }
-        self.val_log = {
-            f['name']: []
-            for f in self.val_functions
-        }
-
-    def gram_matrix(self, *inputs):
-        return None
-
-    def tokenize(self, *inputs):
-        return self(*inputs).flatten(2).permute(0, 2, 1)
 
     def features(self, *inputs):
         return self.tokenize(*inputs)
@@ -137,15 +120,10 @@ class BaseModel(nn.Module):
                     l_f['weight'] * l_f['f'](pred_labels, y_cuda)
                     for l_f in self.train_functions
                 ]
-                batch_loss = sum(batch_losses)
+                batch_loss = sum([
+                    l for l in batch_losses if not torch.isnan(l)
+                ])
                 if self.training:
-                    for l_f, v in zip(self.train_functions, batch_losses):
-                        if isinstance(v, torch.Tensor):
-                            self.train_log[l_f['name']].append(
-                                v.detach().cpu().numpy().tolist()
-                            )
-                        else:
-                            self.train_log[l_f['name']].append(v)
                     try:
                         batch_loss.backward()
                         self.prebatch_update(batch_i, len(data), x_cuda, y_cuda)
@@ -160,18 +138,14 @@ class BaseModel(nn.Module):
                     l_f['f'](pred_labels, y_cuda)
                     for l_f in self.val_functions
                 ]
-                for l_f, v in zip(self.val_functions, batch_losses):
-                    if isinstance(v, torch.Tensor):
-                        self.val_log[l_f['name']].append(
-                            v.detach().cpu().numpy().tolist()
-                        )
-                    else:
-                        self.val_log[l_f['name']].append(v)
                 batch_loss = sum([
                     l_f['weight'] * l
                     for l_f, l in zip(self.val_functions, batch_losses)
+                    if not torch.isnan(l)
                 ])
-                mid_losses.append([l.tolist() for l in batch_losses])
+                mid_losses.append([
+                    l.tolist() for l in batch_losses
+                ])
                 batch_accs = [
                     l_f['f'](pred_labels, y_cuda)
                     for l_f in self.acc_functions
@@ -200,9 +174,9 @@ class BaseModel(nn.Module):
         else:
             # If using the validation data, we actually need to compute the
             # mean of each different loss.
-            mean_losses = np.mean(list(zip(*mid_losses)), axis=1)
+            mean_losses = np.nanmean(list(zip(*mid_losses)), axis=1)
             np_accs = np.array(list(zip(*accs)))
-            mean_accs = np.mean(np_accs, axis=1) if np_accs.size > 0 else []
+            mean_accs = np.nanmean(np_accs, axis=1) if np_accs.size > 0 else []
             return mean_loss, mean_losses, mean_accs
 
     def fit(
@@ -366,9 +340,9 @@ class BaseModel(nn.Module):
             self.dropout_update()
 
             if verbose:
-                print('\033[K', end='')
+                print(' '.join([' '] * 300), end='\r')
                 whites = ' '.join([''] * 12)
-                final_s = whites + ' | '.join(
+                final_s = '\033[K' + whites + ' | '.join(
                     [epoch_s, tr_loss_s, loss_s] +
                     losses_s + acc_s + [drop_s, t_s]
                 )
@@ -382,6 +356,7 @@ class BaseModel(nn.Module):
         t_end = time.time() - t_start
         t_end_s = time_to_string(t_end)
         if verbose:
+            print(' '.join([' '] * 300), end='\r')
             print(
                     'Training finished in {:} epochs ({:}) '
                     'with minimum loss = {:f} (epoch {:d})'.format(
@@ -393,127 +368,23 @@ class BaseModel(nn.Module):
         self.epoch = best_e
         self.load_state_dict(self.best_state)
 
-    def inference(self, data, nonbatched=True, task=None):
-        temp_task = task
-        if temp_task is not None and hasattr(self, 'current_task'):
-            temp_task = self.current_task
-            self.current_task = task
+    def inference(self, data):
         with torch.no_grad():
             if isinstance(data, list) or isinstance(data, tuple):
                 x_cuda = tuple(
                     torch.from_numpy(x_i).to(self.device)
                     for x_i in data
                 )
-                if nonbatched:
-                    x_cuda = tuple(
-                        x_i.unsqueeze(0) for x_i in x_cuda
-                    )
 
                 output = self(*x_cuda)
             else:
                 x_cuda = torch.from_numpy(data).to(self.device)
-                if nonbatched:
-                    x_cuda = x_cuda.unsqueeze(0)
                 output = self(x_cuda)
             torch.cuda.empty_cache()
 
-            if nonbatched:
-                np_output = output[0, 0].cpu().numpy()
-            else:
-                np_output = output.cpu().numpy()
-        if temp_task is not None and hasattr(self, 'current_task'):
-            self.current_task = temp_task
+            np_output = output.cpu().numpy()
 
-        return np_output, np.array([task] * len(output))
-
-    def patch_inference(
-        self, data, patch_size, batch_size, case=0, n_cases=1, t_start=None
-    ):
-        # Init
-        self.eval()
-
-        # Init
-        t_in = time.time()
-        if t_start is None:
-            t_start = t_in
-
-        # This branch is only used when images are too big. In this case
-        # they are split in patches and each patch is trained separately.
-        # Currently, the image is partitioned in blocks with no overlap,
-        # however, it might be a good idea to sample all possible patches,
-        # test them, and average the results. I know both approaches
-        # produce unwanted artifacts, so I don't know.
-        # Initial results. Filled to 0.
-        if isinstance(data, tuple):
-            data_shape = data[0].shape[1:]
-        else:
-            data_shape = data.shape[1:]
-        seg = np.zeros(data_shape)
-        counts = np.zeros(data_shape)
-
-        # The following lines are just a complicated way of finding all
-        # the possible combinations of patch indices.
-        steps = [
-            list(
-                range(0, lim - patch_size, patch_size // 4)
-            ) + [lim - patch_size]
-            for lim in data_shape
-        ]
-
-        steps_product = list(itertools.product(*steps))
-        batches = range(0, len(steps_product), batch_size)
-        n_batches = len(batches)
-
-        # The following code is just a normal test loop with all the
-        # previously computed patches.
-        for bi, batch in enumerate(batches):
-            # Here we just take the current patch defined by its slice
-            # in the x and y axes. Then we convert it into a torch
-            # tensor for testing.
-            slices = [
-                (
-                    slice(xi, xi + patch_size),
-                    slice(xj, xj + patch_size),
-                    slice(xk, xk + patch_size)
-                )
-                for xi, xj, xk in steps_product[batch:(batch + batch_size)]
-            ]
-
-            # Testing itself.
-            with torch.no_grad():
-                if isinstance(data, list) or isinstance(data, tuple):
-                    batch_cuda = tuple(
-                        torch.stack([
-                            torch.from_numpy(
-                                x_i[slice(None), xslice, yslice, zslice]
-                            ).type(torch.float32).to(self.device)
-                            for xslice, yslice, zslice in slices
-                        ])
-                        for x_i in data
-                    )
-                    seg_out = self(*batch_cuda)
-                else:
-                    batch_cuda = torch.stack([
-                        torch.from_numpy(
-                            data[slice(None), xslice, yslice, zslice]
-                        ).type(torch.float32).to(self.device)
-                        for xslice, yslice, zslice in slices
-                    ])
-                    seg_out = self(batch_cuda)
-                torch.cuda.empty_cache()
-
-            # Then we just fill the results image.
-            for si, (xslice, yslice, zslice) in enumerate(slices):
-                counts[xslice, yslice, zslice] += 1
-                seg_bi = seg_out[si, 0].cpu().numpy()
-                seg[xslice, yslice, zslice] += seg_bi
-
-            # Printing
-            self.print_batch(bi, n_batches, case, n_cases, t_start, t_in)
-
-        seg /= counts
-
-        return seg
+        return np_output
 
     def reset_optimiser(self, model_params=None):
         """
@@ -607,8 +478,8 @@ class BaseModel(nn.Module):
             100 * (batch_i + 1) / n_batches, progress_s + remainder_s,
             loss_name, b_loss, mean_loss, time_s, eta_s + '\033[0m'
         )
-        print('\033[K', end='', flush=True)
-        print(batch_s, end='\r', flush=True)
+        print(' '.join([' '] * 300), end='\r')
+        print('\033[K' + batch_s, end='\r', flush=True)
 
     @staticmethod
     def print_batch(pi, n_patches, i, n_cases, t_in, t_case_in):
@@ -630,8 +501,8 @@ class BaseModel(nn.Module):
             100 * (pi + 1) / n_patches,
             progress_s, remainder_s, time_s, eta_s + '\033[0m'
         )
-        print('\033[K', end='', flush=True)
-        print(batch_s, end='\r', flush=True)
+        print(' '.join([' '] * 300), end='\r')
+        print('\033[K' + batch_s, end='\r', flush=True)
 
     def freeze(self):
         """
@@ -658,642 +529,6 @@ class BaseModel(nn.Module):
 
     def load_model(self, net_name):
         self.load_state_dict(
-            torch.load(net_name, map_location=self.device)
+            torch.load(net_name, map_location=self.device),
+            strict=True
         )
-
-
-class DualAttentionAutoencoder(BaseModel):
-    """
-    Main autoencoder class. This class can actually be parameterised on init
-    to have different "main blocks", normalisation layers and activation
-    functions.
-    """
-    def __init__(
-            self,
-            conv_filters,
-            device=torch.device(
-                "cuda:0" if torch.cuda.is_available() else "cpu"
-            ),
-            n_inputs=1,
-            kernel=3,
-            norm=None,
-            activation=None,
-            block=None,
-    ):
-        """
-        Constructor of the class. It's heavily parameterisable to allow for
-        different autoencoder setups (residual blocks, double convolutions,
-        different normalisation and activations).
-        :param conv_filters: Filters for both the encoder and decoder. The
-         decoder mirrors the filters of the encoder.
-        :param device: Device where the model is stored (default is the first
-         cuda device).
-        :param n_inputs: Number of input channels.
-        :param kernel: Kernel width for the main block.
-        :param norm: Normalisation block (it has to be a pointer to a valid
-         normalisation Module).
-        :param activation: Activation block (it has to be a pointer to a valid
-         activation Module).
-        :param block: Main block. It has to be a pointer to a valid block from
-         this python file (otherwise it will fail when trying to create a
-         partial of it).
-        """
-        super().__init__()
-        # Init
-        if norm is None:
-            norm = nn.InstanceNorm3d
-        if block is None:
-            block = ResConv3dBlock
-        block_partial = partial(
-            block, kernel=kernel, norm=norm, activation=activation
-        )
-        self.device = device
-        self.filters = conv_filters
-
-        conv_in, conv_out, deconv_in, deconv_out = block.compute_filters(
-            n_inputs, conv_filters
-        )
-
-        # Down path
-        # We'll use the partial and fill it with the channels for input and
-        # output for each level.
-        self.down = nn.ModuleList([
-            block_partial(f_in, f_out) for f_in, f_out in zip(
-                conv_in, conv_out
-            )
-        ])
-
-        # Bottleneck
-        self.u = AttentionBlock(
-            conv_filters[-2], conv_filters[-1], conv_filters[-2] // 2,
-            norm=norm, activation=activation
-        )
-
-        # Attention blocks
-        self.att = nn.ModuleList([
-            AttentionBlock(
-                f_in, f_in, f_in // 2, norm=norm, activation=activation
-            )
-            for f_in in conv_filters[-2::-1]
-        ])
-
-        # Up path
-        # Now we'll do the same we did on the down path, but mirrored. We also
-        # need to account for the skip connections, that's why we sum the
-        # channels for both outputs. That basically means that we are
-        # concatenating with the skip connection, and not suming.
-        self.up = nn.ModuleList([
-            block_partial(f_in, f_out) for f_in, f_out in zip(
-                deconv_in, deconv_out
-            )
-        ])
-
-    def encode(self, input_s, input_t):
-        # We need to keep track of the convolutional outputs, for the skip
-        # connections.
-        down_inputs = []
-        for c in self.down:
-            c.to(self.device)
-            input_s = c(input_s)
-            input_t = c(input_t)
-            down_inputs.append((input_s, input_t))
-            input_s = F.max_pool3d(input_s, 2)
-            input_t = F.max_pool3d(input_t, 2)
-
-        self.u.to(self.device)
-        inputs = self.u(input_s, input_t)
-
-        return down_inputs, inputs
-
-    def decode(self, inputs, down_inputs):
-        for d, a, (i_s, i_t) in zip(self.up, self.att, down_inputs[::-1]):
-            d.to(self.device)
-            i = a(i_s, i_t)
-            inputs = torch.cat(
-                (F.interpolate(inputs, size=i.size()[2:]), i),
-                dim=1
-            )
-            d(inputs)
-            inputs = d(F.interpolate(inputs, size=i.size()[2:]))
-
-        return inputs
-
-    def forward(self, input_s, input_t):
-        down_inputs, inputs = self.encode(input_s, input_t)
-        output = self.decode(inputs, down_inputs)
-
-        return output
-
-
-class AttentionAutoencoder(BaseModel):
-    """
-    Main autoencoder class. This class can actually be parameterised on init
-    to have different "main blocks", normalisation layers and activation
-    functions.
-    """
-    def __init__(
-            self,
-            conv_filters,
-            device=torch.device(
-                "cuda:0" if torch.cuda.is_available() else "cpu"
-            ),
-            n_inputs=1,
-            kernel=3,
-            pooling=False,
-            norm=None,
-            activation=None,
-            block=None,
-            attention=32,
-            dropout=0,
-    ):
-        """
-        Constructor of the class. It's heavily parameterisable to allow for
-        different autoencoder setups (residual blocks, double convolutions,
-        different normalisation and activations).
-        :param conv_filters: Filters for both the encoder and decoder. The
-         decoder mirrors the filters of the encoder.
-        :param device: Device where the model is stored (default is the first
-         cuda device).
-        :param n_inputs: Number of input channels.
-        :param kernel: Kernel width for the main block.
-        :param pooling: Whether to use pooling or not.
-        :param norm: Normalisation block (it has to be a pointer to a valid
-         normalisation Module).
-        :param activation: Activation block (it has to be a pointer to a valid
-         activation Module).
-        :param block: Main block. It has to be a pointer to a valid block from
-         this python file (otherwise it will fail when trying to create a
-         partial of it).
-        :param dropout: Dropout value.
-        """
-        super().__init__()
-        # Init
-        if norm is None:
-            norm = partial(lambda ch_in: nn.Sequential())
-        if block is None:
-            block = ResConv3dBlock
-        block_partial = partial(
-            block, kernel=kernel, norm=norm, activation=activation
-        )
-        self.pooling = pooling
-        self.device = device
-        self.dropout = dropout
-        self.filters = conv_filters
-        self.skip_inputs = []
-
-        conv_in, conv_out, deconv_in, deconv_out = block.compute_filters(
-            n_inputs, conv_filters
-        )
-
-        # Down path
-        # We'll use the partial and fill it with the channels for input and
-        # output for each level.
-        self.down = nn.ModuleList([
-            block_partial(f_in, f_out) for f_in, f_out in zip(
-                conv_in, conv_out
-            )
-        ])
-        self.ag = nn.ModuleList([
-            AttentionGate3D(f_in, f_g, attention)
-            for f_in, f_g in zip(conv_out[::-1], conv_filters[::-1])
-        ])
-
-        # Bottleneck
-        self.u = block_partial(conv_filters[-2], conv_filters[-1])
-
-        # Up path
-        # Now we'll do the same we did on the down path, but mirrored. We also
-        # need to account for the skip connections, that's why we sum the
-        # channels for both outputs. That basically means that we are
-        # concatenating with the skip connection, and not suming.
-        self.up = nn.ModuleList([
-            block_partial(f_in, f_out) for f_in, f_out in zip(
-                deconv_in, deconv_out
-            )
-        ])
-
-    def encode(self, input_x, *args, **kwargs):
-        # We need to keep track of the convolutional outputs, for the skip
-        # connections.
-        for c in self.down:
-            c.to(self.device)
-            input_x = F.dropout3d(
-                c(input_x), self.dropout, self.training
-            )
-            self.skip_inputs.append(input_x)
-            # Remember that pooling is optional
-            if self.pooling:
-                input_x = F.max_pool3d(input_x, 2)
-
-        self.u.to(self.device)
-        bottleneck = F.dropout3d(self.u(input_x), self.dropout, self.training)
-
-        return bottleneck
-
-    def decode(self, input_x):
-        # attention_maps = []
-        attention_gates = []
-        up_outputs = [input_x]
-        for d, ag, i in zip(self.up, self.ag, self.skip_inputs[::-1]):
-            d.to(self.device)
-            output_ag, attention = ag(i, input_x, True)
-            attention_gates.append(attention)
-            # Remember that pooling is optional
-            if self.pooling:
-                input_x = F.interpolate(input_x, size=i.size()[2:])
-
-            input_x = F.dropout3d(
-                d(torch.cat((input_x, output_ag), dim=1)),
-                self.dropout,
-                self.training
-            )
-            up_outputs.append(input_x)
-
-        self.skip_inputs = []
-
-        return input_x, up_outputs, attention_gates
-
-    def forward(self, input_x, keepfeat=False):
-        input_x = self.encode(input_x)
-
-        output_x, up_outputs, gates = self.decode(input_x)
-
-        output = (output_x, up_outputs, gates) if keepfeat else output_x
-
-        return output
-
-
-class Autoencoder(BaseModel):
-    """
-    Main autoencoder class. This class can actually be parameterised on init
-    to have different "main blocks", normalisation layers and activation
-    functions.
-    """
-    def __init__(
-            self,
-            conv_filters,
-            device=torch.device(
-                "cuda:0" if torch.cuda.is_available() else "cpu"
-            ),
-            n_inputs=1,
-            kernel=3,
-            norm=None,
-            activation=None,
-            block=None,
-            gated=False
-    ):
-        """
-        Constructor of the class. It's heavily parameterisable to allow for
-        different autoencoder setups (residual blocks, double convolutions,
-        different normalisation and activations).
-        :param conv_filters: Filters for both the encoder and decoder. The
-         decoder mirrors the filters of the encoder.
-        :param device: Device where the model is stored (default is the first
-         cuda device).
-        :param n_inputs: Number of input channels.
-        :param kernel: Kernel width for the main block.
-        :param norm: Normalisation block (it has to be a pointer to a valid
-         normalisation Module).
-        :param activation: Activation block (it has to be a pointer to a valid
-         activation Module).
-        :param block: Main block. It has to be a pointer to a valid block from
-         this python file (otherwise it will fail when trying to create a
-         partial of it).
-        :param dropout: Dropout value.
-        """
-        super().__init__()
-        # Init
-        if norm is None:
-            norm = partial(lambda ch_in: nn.Sequential())
-        if block is None:
-            block = ResConv3dBlock
-        block_partial = partial(
-            block, kernel=kernel, norm=norm, activation=activation
-        )
-        self.device = device
-        self.filters = conv_filters
-
-        conv_in, conv_out, deconv_in, deconv_out = block.compute_filters(
-            n_inputs, conv_filters
-        )
-
-        # Down path
-        # We'll use the partial and fill it with the channels for input and
-        # output for each level.
-        self.down = nn.ModuleList([
-            block_partial(f_in, f_out) for f_in, f_out in zip(
-                conv_in, conv_out
-            )
-        ])
-
-        # Bottleneck
-        self.u = block_partial(conv_filters[-2], conv_filters[-1])
-
-        # Up path
-        # Now we'll do the same we did on the down path, but mirrored. We also
-        # need to account for the skip connections, that's why we sum the
-        # channels for both outputs. That basically means that we are
-        # concatenating with the skip connection, and not suming.
-        self.up = nn.ModuleList([
-            block_partial(f_in, f_out) for f_in, f_out in zip(
-                deconv_in, deconv_out
-            )
-        ])
-
-        if gated:
-            self.up_gates = nn.ModuleList([
-                nn.Sequential(
-                    nn.Conv3d(f_in, f_out, 1),
-                    nn.Sigmoid()
-                )
-                for f_in, f_out in zip(conv_in, conv_out)
-            ])
-            self.u_gate = nn.Sequential(
-                nn.Conv3d(conv_filters[-2], conv_filters[-1], 1),
-                nn.Sigmoid()
-            )
-            self.down_gates = nn.ModuleList([
-                nn.Sequential(
-                    nn.Conv3d(f_in, f_out, 1),
-                    nn.Sigmoid()
-                )
-                for f_in, f_out in zip(deconv_in, deconv_out)
-            ])
-            self.gates_out = None
-
-    def encode(self, input_s):
-        # We need to keep track of the convolutional outputs, for the skip
-        # connections.
-        down_inputs = []
-        for c in self.down:
-            c.to(self.device)
-            input_s = c(input_s)
-            down_inputs.append(input_s)
-            # Remember that pooling is optional
-            input_s = F.max_pool3d(input_s, 2)
-
-        self.u.to(self.device)
-        input_s = self.u(input_s)
-
-        return down_inputs, input_s
-
-    def decode(self, input_s, down_inputs):
-        for d, i in zip(self.up, down_inputs[::-1]):
-            d.to(self.device)
-            # Remember that pooling is optional
-            input_s = d(
-                torch.cat(
-                    (F.interpolate(input_s, size=i.size()[2:]), i),
-                    dim=1
-                )
-            )
-
-        return input_s
-
-    def forward(self, input_s, keepfeat=False):
-        down_inputs, input_s = self.encode(input_s)
-
-        features = down_inputs + [input_s] if keepfeat else []
-
-        input_s = self.decode(input_s, down_inputs)
-
-        output = (input_s, features) if keepfeat else input_s
-
-        return output
-
-
-class BaseConv3dBlock(BaseModel):
-    def __init__(self, filters_in, filters_out, kernel):
-        super().__init__()
-        self.conv = partial(
-            nn.Conv3d, kernel_size=kernel, padding=kernel // 2
-        )
-
-    def forward(self, inputs, *args, **kwargs):
-        return self.conv(inputs)
-
-    @staticmethod
-    def default_activation(n_filters):
-        return nn.ReLU()
-
-    @staticmethod
-    def compute_filters(n_inputs, conv_filters):
-        conv_in = [n_inputs] + conv_filters[:-2]
-        conv_out = conv_filters[:-1]
-        down_out = conv_filters[-2::-1]
-        up_out = conv_filters[:0:-1]
-        deconv_in = list(map(sum, zip(down_out, up_out)))
-        deconv_out = down_out
-        return conv_in, conv_out, deconv_in, deconv_out
-
-
-class ResConv3dBlock(BaseConv3dBlock):
-    def __init__(
-            self, filters_in, filters_out,
-            kernel=3, norm=None, activation=None
-    ):
-        super().__init__(filters_in, filters_out, kernel)
-        if activation is None:
-            activation = self.default_activation
-        conv = nn.Conv3d
-
-        self.conv = self.conv(filters_in, filters_out)
-
-        if filters_in != filters_out:
-            self.res = conv(
-                filters_in, filters_out, 1,
-            )
-        else:
-            self.res = None
-
-        self.end_seq = nn.Sequential(
-            activation(filters_out),
-            norm(filters_out)
-        )
-
-    def forward(self, inputs, return_linear=False, *args, **kwargs):
-        res = inputs if self.res is None else self.res(inputs)
-        data = self.conv(inputs) + res
-        if return_linear:
-            return self.end_seq(data), data
-        else:
-            return self.end_seq(data)
-
-
-class AttentionBlock(BaseModel):
-    def __init__(
-            self, filters_in, filters_out, filters_att,
-            kernel=1, norm=None, activation=None
-    ):
-        super().__init__()
-        if activation is None:
-            activation = partial(lambda filters: nn.ReLU())
-        conv = nn.Conv3d
-
-        self.conv_q = conv(
-            filters_in, filters_att, 1,
-        )
-        self.conv_k = conv(
-            filters_in, filters_att, 1,
-        )
-        self.conv_v = conv(
-            filters_in, filters_out, kernel,
-        )
-
-        self.end_seq = nn.Sequential(
-            activation(filters_out),
-            norm(filters_out)
-        )
-
-    def forward(self, source, target):
-        query = F.instance_norm(self.conv_q(source))
-        key = F.instance_norm(self.conv_k(target))
-        value = self.conv_v(target - source)
-        alpha = torch.abs(
-            torch.mean(query * key, dim=1, keepdim=True)
-        )
-        features = torch.clamp(1 - alpha, 0, 1) * value
-        return self.end_seq(features)
-
-
-class AttentionGate3D(nn.Module):
-    """
-    Attention gade block based on
-    Jo Schlemper, Ozann Oktay, Michiel Schaap, Mattias Heinrich, Bernhard
-    Kainz, Ben Glocker, Daniel Rueckert. "Attention gated networks: Learning
-    to leverage salient regions in medical images"
-    https://doi.org/10.1016/j.media.2019.01.012
-    """
-
-    def __init__(
-            self, x_features, g_features, int_features, sigma2=torch.sigmoid
-    ):
-        super().__init__()
-        self.conv_g = nn.Conv3d(g_features, int_features, 1)
-        self.conv_x = nn.Conv3d(x_features, int_features, 1)
-        self.conv_phi = nn.Conv3d(int_features, 1, 1)
-        self.sigma2 = sigma2
-
-    def forward(self, x, g, attention=False):
-        g_emb = self.conv_g(g)
-        x_emb = F.interpolate(
-            self.conv_x(x), size=g_emb.size()[2:]
-        )
-        phi_emb = self.conv_phi(F.relu(g_emb + x_emb))
-        alpha = F.interpolate(
-            self.sigma2(phi_emb), size=x.size()[2:]
-        )
-
-        if attention:
-            return x * alpha, alpha
-        else:
-            return x * alpha
-
-
-class SelfAttention(nn.Module):
-    """
-        Non-local self-attention block based on
-        X. Wang, R. Girshick, A.Gupta, K. He
-        "Non-local Neural Networks"
-        https://arxiv.org/abs/1711.07971
-    """
-
-    def __init__(
-            self, features, att_features,
-            norm=partial(torch.softmax, dim=-1)
-    ):
-        super().__init__()
-        self.features = att_features
-        self.map_key = nn.Conv1d(
-            in_channels=features, out_channels=att_features,
-            kernel_size=1
-        )
-        self.map_query = nn.Conv1d(
-            in_channels=features, out_channels=att_features,
-            kernel_size=1
-        )
-        self.map_value = nn.Conv1d(
-            in_channels=features, out_channels=att_features,
-            kernel_size=1
-        )
-        self.norm = norm
-
-    def forward(self, x):
-        key = self.map_key(x)
-        query = self.map_query(x)
-        value = self.map_value(x)
-
-        att = torch.bmm(key.transpose(-1, -2), query)
-        att_map = self.norm(att / np.sqrt(self.features))
-        features = torch.bmm(value, att_map)
-
-        return features
-
-
-class SelfAttentionBlock(nn.Module):
-    def __init__(self, embed_dim, mlp_dim, heads):
-        super().__init__()
-        self.ln1 = nn.LayerNorm(embed_dim, eps=1e-6)
-        self.attention = nn.MultiheadAttention(
-            embed_dim, heads, batch_first=True
-        )
-        self.ln2 = nn.LayerNorm(embed_dim, eps=1e-6)
-        self.mlp = nn.Linear(embed_dim, mlp_dim)
-
-    def forward(self, x_in, q_in=None):
-        x = self.ln1(x_in)
-        if q_in is not None:
-            q = self.ln1(q_in)
-            x = torch.cat([q, x], dim=1)
-            x, _ = self.attention(
-                query=q, key=x, value=x, need_weights=False
-            )
-        else:
-            x, _ = self.attention(
-                query=x, key=x, value=x, need_weights=False
-            )
-        x = x + x_in
-
-        y = self.ln2(x)
-        y = self.mlp(y)
-
-        return x + y
-
-
-class ViTEncoder(nn.Module):
-    """
-        Multi-headed attention based on
-        A. Vaswani, N. Shazeer, N. Parmar, J. Uszkoreit, Ll. Jones, A.N. Gomez,
-        L. Kaiser, I. Polosukhin
-        "Attention Is All You Need"
-        https://arxiv.org/abs/1706.03762
-    """
-
-    def __init__(
-        self, features, att_features, heads=16,
-        norm=partial(torch.softmax, dim=1),
-    ):
-        super().__init__()
-        self.blocks = heads
-        self.norm = nn.GroupNorm(1, features)
-        self.sa_blocks = nn.ModuleList([
-            SelfAttention(
-                features, att_features, norm
-            )
-            for _ in range(self.blocks)
-        ])
-        self.projector = nn.Conv1d(att_features * heads, features, 1)
-        self.final_block = nn.Sequential(
-            nn.InstanceNorm1d(features),
-            nn.Conv1d(features, features, 1),
-            nn.ReLU(),
-            nn.InstanceNorm1d(features),
-            nn.Conv1d(features, features, 1)
-        )
-
-    def forward(self, x):
-        norm_x = self.norm(x)
-        sa = torch.cat([sa_i(norm_x) for sa_i in self.sa_blocks], dim=1)
-        msa = self.projector(sa)
-        x = x + msa
-        return self.final_block(x) + x
