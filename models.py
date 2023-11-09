@@ -396,7 +396,7 @@ class ViT_B_16(Classifier):
         return self.vit.conv_proj
 
 
-class FCN_ResNet50(Classifier):
+class FCN_ResNet50(Segmenter):
     def __init__(
         self, n_inputs, n_outputs, pretrained=False, lr=1e-3,
         device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
