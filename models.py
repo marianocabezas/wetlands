@@ -420,17 +420,19 @@ class FCN_ResNet50(Segmenter):
                 n_inputs, 64, kernel_size=7, stride=2, padding=3, bias=False
             )
             # We assume that RGB channels will be the first 3
-            conv_input.weight.data[:, :3, ...].copy_(self.fcn.backbone.conv1.weight.data)
+            conv_input.weight.data[:, :3, ...].copy_(
+                self.fcn.backbone.conv1.weight.data
+            )
             self.fcn.backbone.conv1 = conv_input
         elif n_inputs < 3:
             self.fcn.backbone.conv1 = nn.Conv2d(
                 n_inputs, 64, kernel_size=7, stride=2, padding=3, bias=False
             )
-        self.last_features = self.fcn.classifier[-1].in_features
+        self.last_features = self.fcn.classifier[-1].in_channels
         self.fcn.classifier[-1] = nn.Conv2d(
             self.last_features, 2, kernel_size=1, stride=1
         )
-        self.aux_last_features = self.fcn.aux_classifier[-1].in_features
+        self.aux_last_features = self.fcn.aux_classifier[-1].in_channels
         self.fcn.aux_classifier[-1] = nn.Conv2d(
             self.aux_last_features, 2, kernel_size=1, stride=1
         )
