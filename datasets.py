@@ -442,7 +442,7 @@ class BalancedLythrumDataset(Dataset):
             self.minority = bck_slices
         else:
             self.majority = bck_slices
-            self.minority_label = np.array([1], dtype=np.uint8)
+            self.minority = patch_slices
 
         self.current_majority = deepcopy(self.majority)
         self.current_minority = deepcopy(self.minority)
