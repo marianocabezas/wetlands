@@ -12,6 +12,100 @@ from torch.utils.data.dataset import Dataset
 ''' Utility function for patch creation '''
 
 
+def centers_to_slice(voxels, patch_half):
+    """
+    Function to convert a list of indices defining the center of a patch, to
+    a real patch defined using slice objects for each dimension.
+    :param voxels: List of indices to the center of the slice.
+    :param patch_half: List of integer halves (//) of the patch_size.
+    """
+    slices = [
+        tuple(
+            [
+                slice(idx - p_len, idx + p_len) for idx, p_len in zip(
+                    voxel, patch_half
+                )
+            ]
+        ) for voxel in voxels
+    ]
+    return slices
+
+
+def get_slices(masks, patch_size, overlap):
+    """
+    Function to get all the patches with a given patch size and overlap between
+    consecutive patches from a given list of masks. We will only take patches
+    inside the bounding box of the mask. We could probably just pass the shape
+    because the masks should already be the bounding box.
+    :param masks: List of masks.
+    :param patch_size: Size of the patches.
+    :param overlap: Overlap on each dimension between consecutive patches.
+
+    """
+    # Init
+    # We will compute some intermediate stuff for later.
+    patch_half = [p_length // 2 for p_length in patch_size]
+    steps = [max(p_length - o, 1) for p_length, o in zip(patch_size, overlap)]
+    # indices = [np.where(mask) for mask in masks]
+    # min_indices = [np.min(idx) for idx in indices]
+    # max_indices = [np.max(idx) for idx in indices]
+    # min_bb = np.min(min_indices, axis=0)
+    # max_bb = np.max(max_indices)
+
+    # We will need to define the min and max pixel indices. We define the
+    # centers for each patch, so the min and max should be defined by the
+    # patch halves.
+    # min_bb = [patch_half] * len(masks)
+    min_bb = [
+        [
+            max(patch_len, min_i)
+            for min_i, patch_len in zip(
+                np.min(np.where(mask), axis=-1), patch_half
+            )
+        ] for mask in masks
+    ]
+    # max_bb = [
+    #     [
+    #         max_i - p_len for max_i, p_len in zip(mask.shape, patch_half)
+    #     ] for mask in masks
+    # ]
+    max_bb = [
+        [
+            min(bound_i - patch_len, max_i)
+            for bound_i, max_i, patch_len in zip(
+                mask.shape, np.max(np.where(mask), axis=-1), patch_half
+            )
+        ] for mask in masks
+    ]
+
+    # This is just a "pythonic" but complex way of defining all possible
+    # indices given a min, max and step values for each dimension.
+    dim_ranges = [
+        map(
+            lambda t: np.concatenate([np.arange(*t), [t[1]]]),
+            zip(min_bb_i, max_bb_i, steps)
+        ) for min_bb_i, max_bb_i in zip(min_bb, max_bb)
+    ]
+
+    # And this is another "pythonic" but not so intuitive way of computing
+    # all possible triplets of center voxel indices given the previous
+    # indices. I also added the slice computation (which makes the last step
+    # of defining the patches).
+    patch_slices = [
+        centers_to_slice(
+            itertools.product(*dim_range), patch_half
+        ) for dim_range in dim_ranges
+    ]
+
+    return patch_slices
+
+
+'''
+Dataset classes
+'''
+
+
+# Rumex detection dataset
 class RumexDataset(Dataset):
     """
     Dataset that uses a preloaded tensor with natural images, including
@@ -285,3 +379,88 @@ class RumexTestDataset(Dataset):
 
     def __len__(self):
         return len(self.patches)
+
+
+# Lythrum dataset
+class LythrumDataset(Dataset):
+    """
+    Dataset that uses a preloaded tensor with natural images, including
+    classification labels.
+    """
+    def __init__(self, mosaic, mask, patch_size, norm=True):
+        if norm:
+            im_mean = np.mean(mosaic, axis=(1, 2), keepdims=True)
+            im_std = np.std(mosaic, axis=(1, 2), keepdims=True)
+            self.mosaic = (mosaic - im_mean) / im_std
+        else:
+            self.mosaic = mosaic
+        self.mask = mask
+        self.patches = get_slices([mask], patch_size, patch_size // 2)[0]
+
+    def __getitem__(self, index):
+        patch = self.patches[index]
+        x = self.mosaic[patch].astype(np.float32)
+        y = self.mask[patch].astype(np.uint8)
+
+        return x, y
+
+    def __len__(self):
+        return len(self.patches)
+
+
+class BalancedLythrumDataset(Dataset):
+    """
+    Dataset that uses a preloaded tensor with natural images, including
+    classification labels.
+    """
+    def __init__(self, mosaic, mask, patch_size, norm=True):
+        if norm:
+            im_mean = np.mean(mosaic, axis=(1, 2), keepdims=True)
+            im_std = np.std(mosaic, axis=(1, 2), keepdims=True)
+            self.mosaic = (mosaic - im_mean) / im_std
+        else:
+            self.mosaic = mosaic
+        self.mask = mask
+        patches = get_slices([mask], patch_size, patch_size // 2)[0]
+
+        patch_slices = [s for s in patches if np.sum(mask[s]) > 0]
+        bck_slices = [s for s in patches if np.sum(mask[s]) == 0]
+        n_positives = len(patch_slices)
+        n_negatives = len(bck_slices)
+
+        positive_imbalance = n_positives > n_negatives
+
+        if positive_imbalance:
+            self.majority = patch_slices
+            self.majority_label = np.array([1], dtype=np.uint8)
+
+            self.minority = bck_slices
+            self.minority_label = np.array([0], dtype=np.uint8)
+        else:
+            self.majority = bck_slices
+            self.majority_label = np.array([0], dtype=np.uint8)
+
+            self.minority = patch_slices
+            self.minority_label = np.array([1], dtype=np.uint8)
+
+        self.current_majority = deepcopy(self.majority)
+        self.current_minority = deepcopy(self.minority)
+
+    def __getitem__(self, index):
+        if index < len(self.minority):
+            index = np.random.randint(len(self.current_minority))
+            patch = self.current_minority.pop(index)
+            if len(self.current_minority) == 0:
+                self.current_minority = deepcopy(self.minority)
+        else:
+            index = np.random.randint(len(self.current_majority))
+            patch = self.current_majority.pop(index)
+            if len(self.current_majority) == 0:
+                self.current_majority = deepcopy(self.majority)
+        x = self.mosaic[patch].astype(np.float32)
+        y = self.mask[patch].astype(np.uint8)
+
+        return x, y
+
+    def __len__(self):
+        return len(self.minority) * 2
