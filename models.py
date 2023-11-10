@@ -1,5 +1,9 @@
+import time
 import math
+import itertools
+import numpy as np
 from torchvision import models
+from torchvision.models import segmentation as seg_models
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -145,6 +149,95 @@ class Segmenter(BaseModel):
 
     def forward(self, *inputs):
         return None
+
+    def patch_inference(
+        self, data, patch_size, batch_size, case=0, n_cases=1, t_start=None
+    ):
+        # Init
+        self.eval()
+
+        # Init
+        t_in = time.time()
+        if t_start is None:
+            t_start = t_in
+
+        # This branch is only used when images are too big. In this case
+        # they are split in patches and each patch is trained separately.
+        # Currently, the image is partitioned in blocks with no overlap,
+        # however, it might be a good idea to sample all possible patches,
+        # test them, and average the results. I know both approaches
+        # produce unwanted artifacts, so I don't know.
+        # Initial results. Filled to 0.
+        if isinstance(data, tuple):
+            data_shape = data[0].shape[1:]
+        else:
+            data_shape = data.shape[1:]
+        seg = np.zeros(data_shape)
+        counts = np.zeros(data_shape)
+
+        # The following lines are just a complicated way of finding all
+        # the possible combinations of patch indices.
+        steps = [
+            list(
+                range(0, lim - patch_size, patch_size // 4)
+            ) + [lim - patch_size]
+            for lim in data_shape
+        ]
+
+        steps_product = list(itertools.product(*steps))
+        batches = range(0, len(steps_product), batch_size)
+        n_batches = len(batches)
+
+        # The following code is just a normal test loop with all the
+        # previously computed patches.
+        for bi, batch in enumerate(batches):
+            # Here we just take the current patch defined by its slice
+            # in the x and y axes. Then we convert it into a torch
+            # tensor for testing.
+            slices = [
+                (
+                    slice(xi, xi + patch_size),
+                    slice(xj, xj + patch_size),
+                    slice(xk, xk + patch_size)
+                )
+                for xi, xj, xk in steps_product[batch:(batch + batch_size)]
+            ]
+
+            # Testing itself.
+            with torch.no_grad():
+                if isinstance(data, list) or isinstance(data, tuple):
+                    batch_cuda = tuple(
+                        torch.stack([
+                            torch.from_numpy(
+                                x_i[slice(None), xslice, yslice, zslice]
+                            ).type(torch.float32).to(self.device)
+                            for xslice, yslice, zslice in slices
+                        ])
+                        for x_i in data
+                    )
+                    seg_out = self(*batch_cuda)
+                else:
+                    batch_cuda = torch.stack([
+                        torch.from_numpy(
+                            data[slice(None), xslice, yslice, zslice]
+                        ).type(torch.float32).to(self.device)
+                        for xslice, yslice, zslice in slices
+                    ])
+                    seg_out = self(batch_cuda)
+                torch.cuda.empty_cache()
+
+            # Then we just fill the results image.
+            for si, (xslice, yslice, zslice) in enumerate(slices):
+                counts[xslice, yslice, zslice] += 1
+                seg_bi = seg_out[si, 0].cpu().numpy()
+                seg[xslice, yslice, zslice] += seg_bi
+
+            # Printing
+            self.print_batch(bi, n_batches, case, n_cases, t_start, t_in)
+
+        seg /= counts
+
+        return seg
 
 
 class ConvNeXtTiny(Classifier):
@@ -436,6 +529,65 @@ class FCN_ResNet50(Segmenter):
         self.aux_last_features = self.fcn.aux_classifier[-1].in_channels
         self.fcn.aux_classifier[-1] = nn.Conv2d(
             self.aux_last_features, 2, kernel_size=1, stride=1
+        )
+
+        # <Optimizer setup>
+        # We do this last step after all parameters are defined
+        model_params = filter(lambda p: p.requires_grad, self.parameters())
+        self.optimizer_alg = torch.optim.Adam(model_params, lr=self.lr)
+        if verbose > 1:
+            print(
+                'Network created on device {:} with training losses '
+                '[{:}] and validation losses [{:}]'.format(
+                    self.device,
+                    ', '.join([tf['name'] for tf in self.train_functions]),
+                    ', '.join([vf['name'] for vf in self.val_functions])
+                )
+            )
+
+    def forward(self, data):
+        self.fcn.to(self.device)
+        return self.fcn(data)['out']
+
+    def target_layer(self):
+        return self.fcn.backbone
+
+
+class DeeplabV3_MobileNet(Segmenter):
+    def __init__(
+        self, n_inputs, n_outputs, pretrained=False, lr=1e-3,
+        device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
+        verbose=True
+    ):
+        super().__init__(n_outputs)
+        # Init
+        self.channels = n_inputs
+        self.lr = lr
+        self.device = device
+        if pretrained:
+            try:
+                weights = seg_models.DeepLabV3_MobileNet_V3_Large_Weights.DEFAULT
+                self.dl3 = seg_models.deeplabv3_mobilenet_v3_large(weights=weights)
+            except TypeError:
+                self.dl3 = seg_models.deeplabv3_mobilenet_v3_large(pretrained)
+        else:
+            self.dl3 = seg_models.deeplabv3_mobilenet_v3_large
+        if n_inputs > 3:
+            conv_input = nn.Conv2d(
+                n_inputs, 64, kernel_size=7, stride=2, padding=3, bias=False
+            )
+            # We assume that RGB channels will be the first 3
+            conv_input.weight.data[:, :3, ...].copy_(
+                self.dl3.backbone.conv1.weight.data
+            )
+            self.dl3.backbone.conv1 = conv_input
+        elif n_inputs < 3:
+            self.dl3.backbone.conv1 = nn.Conv2d(
+                n_inputs, 64, kernel_size=7, stride=2, padding=3, bias=False
+            )
+        self.last_features = self.dl3.classifier[-1].in_channels
+        self.dl3.classifier[-1] = nn.Conv2d(
+            self.last_features, 2, kernel_size=1, stride=1
         )
 
         # <Optimizer setup>
