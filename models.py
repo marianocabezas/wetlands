@@ -195,12 +195,8 @@ class Segmenter(BaseModel):
             # in the x and y axes. Then we convert it into a torch
             # tensor for testing.
             slices = [
-                (
-                    slice(xi, xi + patch_size),
-                    slice(xj, xj + patch_size),
-                    slice(xk, xk + patch_size)
-                )
-                for xi, xj, xk in steps_product[batch:(batch + batch_size)]
+                tuple([slice(idx, idx + patch_size) for idx in indices])
+                for indices in steps_product[batch:(batch + batch_size)]
             ]
 
             # Testing itself.
@@ -209,9 +205,9 @@ class Segmenter(BaseModel):
                     batch_cuda = tuple(
                         torch.stack([
                             torch.from_numpy(
-                                x_i[slice(None), xslice, yslice, zslice]
+                                x_i[slice(None), xslice, yslice]
                             ).type(torch.float32).to(self.device)
-                            for xslice, yslice, zslice in slices
+                            for xslice, yslice in slices
                         ])
                         for x_i in data
                     )
@@ -219,18 +215,18 @@ class Segmenter(BaseModel):
                 else:
                     batch_cuda = torch.stack([
                         torch.from_numpy(
-                            data[slice(None), xslice, yslice, zslice]
+                            data[slice(None), xslice, yslice]
                         ).type(torch.float32).to(self.device)
-                        for xslice, yslice, zslice in slices
+                        for xslice, yslice in slices
                     ])
                     seg_out = self(batch_cuda)
                 torch.cuda.empty_cache()
 
             # Then we just fill the results image.
-            for si, (xslice, yslice, zslice) in enumerate(slices):
-                counts[xslice, yslice, zslice] += 1
+            for si, (xslice, yslice) in enumerate(slices):
+                counts[xslice, yslice] += 1
                 seg_bi = seg_out[si, 0].cpu().numpy()
-                seg[xslice, yslice, zslice] += seg_bi
+                seg[xslice, yslice] += seg_bi
 
             # Printing
             self.print_batch(bi, n_batches, case, n_cases, t_start, t_in)
