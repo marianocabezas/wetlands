@@ -574,16 +574,16 @@ class DeeplabV3_MobileNet(Segmenter):
             self.dl3 = seg_models.deeplabv3_mobilenet_v3_large
         if n_inputs > 3:
             conv_input = nn.Conv2d(
-                n_inputs, 64, kernel_size=7, stride=2, padding=3, bias=False
+                n_inputs, 16, kernel_size=7, stride=2, padding=3, bias=False
             )
             # We assume that RGB channels will be the first 3
             conv_input.weight.data[:, :3, ...].copy_(
-                self.dl3.backbone.conv1.weight.data
+                getattr(self.dl3.backbone, '0')[0]
             )
-            self.dl3.backbone.conv1 = conv_input
+            getattr(self.dl3.backbone, '0')[0] = conv_input
         elif n_inputs < 3:
-            self.dl3.backbone.conv1 = nn.Conv2d(
-                n_inputs, 64, kernel_size=7, stride=2, padding=3, bias=False
+            getattr(self.dl3.backbone, '0')[0] = nn.Conv2d(
+                n_inputs, 16, kernel_size=7, stride=2, padding=3, bias=False
             )
         self.last_features = self.dl3.classifier[-1].in_channels
         self.dl3.classifier[-1] = nn.Conv2d(
@@ -605,8 +605,8 @@ class DeeplabV3_MobileNet(Segmenter):
             )
 
     def forward(self, data):
-        self.fcn.to(self.device)
-        return self.fcn(data)['out']
+        self.dl3.to(self.device)
+        return self.dl3(data)
 
     def target_layer(self):
-        return self.fcn.backbone
+        return self.dl3.backbone
