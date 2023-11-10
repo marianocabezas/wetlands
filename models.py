@@ -123,14 +123,15 @@ class Segmenter(BaseModel):
         p = torch.flatten(torch.argmax(predicted, dim=1), start_dim=1)
         t = torch.flatten(target, start_dim=1).to(predicted.device)
         intersection = torch.stack([
-            2 * torch.sum(
-                (p == label).type_as(p) * (t == label).type_as(p),
-                dim=1
+            torch.sum(
+                torch.logical_or(p == label, t == label).type_as(p), dim=1
             )
             for label in range(self.n_classes)
         ])
         union = torch.stack([
-            torch.sum(torch.logical_or(p == label, t == label).type_as(p), dim=1)
+            torch.sum(
+                torch.logical_or(p == label, t == label).type_as(p), dim=1
+            )
             for label in range(self.n_classes)
         ])
         miou_k = torch.mean(intersection / union, dim=0)
