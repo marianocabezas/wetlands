@@ -107,14 +107,9 @@ class Segmenter(BaseModel):
             for label in range(self.n_classes)
         ])
         sum_target = torch.stack([
-            torch.sum((target == label).type_as(p), dim=1)
+            torch.sum((t == label).type_as(p), dim=1)
             for label in range(self.n_classes)
         ])
-        print(
-            intersection.shape, sum_pred.shape, sum_target.shape,
-            p.shape, t.shape, predicted.shape, target.shape
-
-        )
         dsc_k = torch.mean(intersection / (sum_pred + sum_target), dim=0)
         dsc_k = dsc_k[torch.logical_not(torch.isnan(dsc_k))]
         if len(dsc_k) > 0:
@@ -135,7 +130,7 @@ class Segmenter(BaseModel):
             for label in range(self.n_classes)
         ])
         union = torch.stack([
-            torch.sum(torch.logical_or(p == label, target == label).type_as(p), dim=1)
+            torch.sum(torch.logical_or(p == label, t == label).type_as(p), dim=1)
             for label in range(self.n_classes)
         ])
         miou_k = torch.mean(intersection / union, dim=0)
