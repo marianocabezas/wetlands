@@ -172,7 +172,7 @@ class Segmenter(BaseModel):
             data_shape = data[0].shape[1:]
         else:
             data_shape = data.shape[1:]
-        seg = np.zeros(data_shape)
+        seg = np.zeros((self.n_classes,) + data_shape)
         counts = np.zeros(data_shape)
 
         # The following lines are just a complicated way of finding all
@@ -225,8 +225,8 @@ class Segmenter(BaseModel):
             # Then we just fill the results image.
             for si, (xslice, yslice) in enumerate(slices):
                 counts[xslice, yslice] += 1
-                seg_bi = seg_out[si, 0].cpu().numpy()
-                seg[xslice, yslice] += seg_bi
+                seg_bi = seg_out[si].cpu().numpy()
+                seg[:, xslice, yslice] += seg_bi
 
             # Printing
             self.print_batch(bi, n_batches, case, n_cases, t_start, t_in)
