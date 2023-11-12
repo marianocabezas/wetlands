@@ -520,11 +520,11 @@ class FCN_ResNet50(Segmenter):
             )
         self.last_features = self.fcn.classifier[-1].in_channels
         self.fcn.classifier[-1] = nn.Conv2d(
-            self.last_features, 2, kernel_size=1, stride=1
+            self.last_features, n_outputs, kernel_size=1, stride=1
         )
         self.aux_last_features = self.fcn.aux_classifier[-1].in_channels
         self.fcn.aux_classifier[-1] = nn.Conv2d(
-            self.aux_last_features, 2, kernel_size=1, stride=1
+            self.aux_last_features, n_outputs, kernel_size=1, stride=1
         )
 
         # <Optimizer setup>
@@ -570,7 +570,7 @@ class DeeplabV3_MobileNet(Segmenter):
             self.dl3 = seg_models.deeplabv3_mobilenet_v3_large()
         if n_inputs > 3:
             conv_input = nn.Conv2d(
-                n_inputs, 16, kernel_size=7, stride=2, padding=3, bias=False
+                n_inputs, 16, kernel_size=3, stride=2, padding=1, bias=False
             )
             # We assume that RGB channels will be the first 3
             conv_input.weight.data[:, :3, ...].copy_(
@@ -579,11 +579,11 @@ class DeeplabV3_MobileNet(Segmenter):
             getattr(self.dl3.backbone, '0')[0] = conv_input
         elif n_inputs < 3:
             getattr(self.dl3.backbone, '0')[0] = nn.Conv2d(
-                n_inputs, 16, kernel_size=7, stride=2, padding=3, bias=False
+                n_inputs, 16, kernel_size=3, stride=2, padding=1, bias=False
             )
         self.last_features = self.dl3.classifier[-1].in_channels
         self.dl3.classifier[-1] = nn.Conv2d(
-            self.last_features, 2, kernel_size=1, stride=1
+            self.last_features, n_outputs, kernel_size=1, stride=1
         )
 
         # <Optimizer setup>
@@ -642,7 +642,7 @@ class DeeplabV3_ResNet50(Segmenter):
             )
         self.last_features = self.dl3.classifier[-1].in_channels
         self.dl3.classifier[-1] = nn.Conv2d(
-            self.last_features, 2, kernel_size=1, stride=1
+            self.last_features, n_outputs, kernel_size=1, stride=1
         )
 
         # <Optimizer setup>
@@ -665,3 +665,62 @@ class DeeplabV3_ResNet50(Segmenter):
 
     def target_layer(self):
         return self.dl3.backbone
+
+
+class LRASPP_MobileNet(Segmenter):
+    def __init__(
+        self, n_inputs, n_outputs, pretrained=False, lr=1e-3,
+        device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
+        verbose=True
+    ):
+        super().__init__(n_outputs)
+        # Init
+        self.channels = n_inputs
+        self.lr = lr
+        self.device = device
+        if pretrained:
+            try:
+                weights = seg_models.LRASPP_MobileNet_V3_Large_Weights.DEFAULT
+                self.lraspp = seg_models.lraspp_mobilenet_v3_large(weights=weights)
+            except TypeError:
+                self.lraspp = seg_models.lraspp_mobilenet_v3_large(pretrained)
+        else:
+            self.lraspp = seg_models.lraspp_mobilenet_v3_large()
+        if n_inputs > 3:
+            conv_input = nn.Conv2d(
+                n_inputs, 16, kernel_size=3, stride=2, padding=1, bias=False
+            )
+            # We assume that RGB channels will be the first 3
+            conv_input.weight.data[:, :3, ...].copy_(
+                getattr(self.lraspp.backbone, '0')[0].weight.data
+            )
+            getattr(self.lraspp.backbone, '0')[0] = conv_input
+        elif n_inputs < 3:
+            getattr(self.lraspp.backbone, '0')[0] = nn.Conv2d(
+                n_inputs, 16, kernel_size=3, stride=2, padding=1, bias=False
+            )
+        self.last_features = self.dl3.classifier[-1].in_channels
+        self.lraspp.classifier[-1] = nn.Conv2d(
+            self.last_features, n_outputs, kernel_size=1, stride=1
+        )
+
+        # <Optimizer setup>
+        # We do this last step after all parameters are defined
+        model_params = filter(lambda p: p.requires_grad, self.parameters())
+        self.optimizer_alg = torch.optim.Adam(model_params, lr=self.lr)
+        if verbose > 1:
+            print(
+                'Network created on device {:} with training losses '
+                '[{:}] and validation losses [{:}]'.format(
+                    self.device,
+                    ', '.join([tf['name'] for tf in self.train_functions]),
+                    ', '.join([vf['name'] for vf in self.val_functions])
+                )
+            )
+
+    def forward(self, data):
+        self.lraspp.to(self.device)
+        return self.lraspp(data)['out']
+
+    def target_layer(self):
+        return self.lraspp.backbone
