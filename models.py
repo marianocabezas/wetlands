@@ -504,7 +504,7 @@ class FCN_ResNet50(Segmenter):
             except TypeError:
                 self.fcn = models.segmentation.fcn_resnet50(pretrained)
         else:
-            self.fcn = models.segmentation.fcn_resnet50
+            self.fcn = models.segmentation.fcn_resnet50()
         if n_inputs > 3:
             conv_input = nn.Conv2d(
                 n_inputs, 64, kernel_size=7, stride=2, padding=3, bias=False
@@ -567,18 +567,77 @@ class DeeplabV3_MobileNet(Segmenter):
             except TypeError:
                 self.dl3 = seg_models.deeplabv3_mobilenet_v3_large(pretrained)
         else:
-            self.dl3 = seg_models.deeplabv3_mobilenet_v3_large
+            self.dl3 = seg_models.deeplabv3_mobilenet_v3_large()
         if n_inputs > 3:
             conv_input = nn.Conv2d(
                 n_inputs, 16, kernel_size=7, stride=2, padding=3, bias=False
             )
             # We assume that RGB channels will be the first 3
             conv_input.weight.data[:, :3, ...].copy_(
-                getattr(self.dl3.backbone, '0')[0]
+                getattr(self.dl3.backbone, '0')[0].weight.data
             )
             getattr(self.dl3.backbone, '0')[0] = conv_input
         elif n_inputs < 3:
             getattr(self.dl3.backbone, '0')[0] = nn.Conv2d(
+                n_inputs, 16, kernel_size=7, stride=2, padding=3, bias=False
+            )
+        self.last_features = self.dl3.classifier[-1].in_channels
+        self.dl3.classifier[-1] = nn.Conv2d(
+            self.last_features, 2, kernel_size=1, stride=1
+        )
+
+        # <Optimizer setup>
+        # We do this last step after all parameters are defined
+        model_params = filter(lambda p: p.requires_grad, self.parameters())
+        self.optimizer_alg = torch.optim.Adam(model_params, lr=self.lr)
+        if verbose > 1:
+            print(
+                'Network created on device {:} with training losses '
+                '[{:}] and validation losses [{:}]'.format(
+                    self.device,
+                    ', '.join([tf['name'] for tf in self.train_functions]),
+                    ', '.join([vf['name'] for vf in self.val_functions])
+                )
+            )
+
+    def forward(self, data):
+        self.dl3.to(self.device)
+        return self.dl3(data)['out']
+
+    def target_layer(self):
+        return self.dl3.backbone
+
+
+class DeeplabV3_ResNet50(Segmenter):
+    def __init__(
+        self, n_inputs, n_outputs, pretrained=False, lr=1e-3,
+        device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
+        verbose=True
+    ):
+        super().__init__(n_outputs)
+        # Init
+        self.channels = n_inputs
+        self.lr = lr
+        self.device = device
+        if pretrained:
+            try:
+                weights = seg_models.DeepLabV3_ResNet50_Weights.DEFAULT
+                self.dl3 = seg_models.deeplabv3_resnet50(weights=weights)
+            except TypeError:
+                self.dl3 = seg_models.deeplabv3_resnet50(pretrained)
+        else:
+            self.dl3 = seg_models.deeplabv3_resnet50()
+        if n_inputs > 3:
+            conv_input = nn.Conv2d(
+                n_inputs, 16, kernel_size=7, stride=2, padding=3, bias=False
+            )
+            # We assume that RGB channels will be the first 3
+            conv_input.weight.data[:, :3, ...].copy_(
+                self.dl3.backbone.conv1.weight.data
+            )
+            self.dl3.backbone.conv1 = conv_input
+        elif n_inputs < 3:
+            self.dl3.backbone.conv1 = nn.Conv2d(
                 n_inputs, 16, kernel_size=7, stride=2, padding=3, bias=False
             )
         self.last_features = self.dl3.classifier[-1].in_channels
