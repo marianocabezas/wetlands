@@ -602,7 +602,7 @@ class DeeplabV3_MobileNet(Segmenter):
 
     def forward(self, data):
         self.dl3.to(self.device)
-        return self.dl3(data)
+        return self.dl3(data)['out']
 
     def target_layer(self):
         return self.dl3.backbone
