@@ -134,7 +134,7 @@ class Segmenter(BaseModel):
         ])
         union = torch.stack([
             torch.sum(
-                torch.logical_or(p == label, t == label).type_as(p), dim=1
+                torch.logical_and(p == label, t == label).type_as(p), dim=1
             )
             for label in range(self.n_classes)
         ])
