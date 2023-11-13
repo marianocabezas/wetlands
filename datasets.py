@@ -386,7 +386,7 @@ class BalancedWetlandsDataset(Dataset):
     Dataset that uses a preloaded tensor with natural images, including
     classification labels.
     """
-    def __init__(self, mosaic, mask, patch_size, norm=True):
+    def __init__(self, mosaic, mask, patch_size, overlap, norm=True):
         if norm:
             im_mean = np.mean(mosaic, axis=(1, 2), keepdims=True)
             im_std = np.std(mosaic, axis=(1, 2), keepdims=True)
@@ -396,7 +396,7 @@ class BalancedWetlandsDataset(Dataset):
         self.mask = mask
         patches = get_slices(
             [mask], (patch_size, patch_size),
-            (patch_size // 2, patch_size // 2)
+            (overlap, overlap)
         )[0]
 
         patch_slices = [s for s in patches if np.sum(mask[s]) > 0]
@@ -441,7 +441,7 @@ class WetlandsDataset(Dataset):
     Dataset that uses a preloaded tensor with natural images, including
     classification labels.
     """
-    def __init__(self, mosaic, labels, patch_size, norm=True):
+    def __init__(self, mosaic, labels, patch_size, overlap, norm=True):
         if norm:
             im_mean = np.mean(mosaic, axis=(1, 2), keepdims=True)
             im_std = np.std(mosaic, axis=(1, 2), keepdims=True)
@@ -451,7 +451,7 @@ class WetlandsDataset(Dataset):
         self.labels = labels
         self.patches = get_slices(
             [labels], (patch_size, patch_size),
-            (patch_size // 2, patch_size // 2)
+            (overlap, overlap)
         )[0]
 
     def __getitem__(self, index):
