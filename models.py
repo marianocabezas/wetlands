@@ -814,7 +814,7 @@ class Unet2D(Segmenter):
             Autoencoder(
                 self.conv_filters, device, n_inputs
             ),
-            nn.Conv2d(self.conv_filters[0], 1, 1)
+            nn.Conv2d(self.conv_filters[0], n_outputs, 1)
         )
         self.segmenter.to(device)
 
