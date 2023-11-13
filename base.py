@@ -9,6 +9,10 @@ import numpy as np
 from utils import time_to_string
 
 
+def norm_f(n_f):
+    return nn.GroupNorm(n_f // 4, n_f)
+
+
 class BaseModel(nn.Module):
     """"
     This is the baseline model to be used for any of my networks. The idea
@@ -518,3 +522,183 @@ class BaseModel(nn.Module):
             torch.load(net_name, map_location=self.device),
             strict=True
         )
+
+
+class Autoencoder(BaseModel):
+    """
+    Main autoencoder class. This class can actually be parameterised on init
+    to have different "main blocks", normalisation layers and activation
+    functions.
+    """
+    def __init__(
+            self,
+            conv_filters,
+            device=torch.device(
+                "cuda:0" if torch.cuda.is_available() else "cpu"
+            ),
+            n_inputs=1,
+            kernel=3,
+            norm=None,
+            activation=None,
+            block=None,
+    ):
+        """
+        Constructor of the class. It's heavily parameterisable to allow for
+        different autoencoder setups (residual blocks, double convolutions,
+        different normalisation and activations).
+        :param conv_filters: Filters for both the encoder and decoder. The
+         decoder mirrors the filters of the encoder.
+        :param device: Device where the model is stored (default is the first
+         cuda device).
+        :param n_inputs: Number of input channels.
+        :param kernel: Kernel width for the main block.
+        :param norm: Normalisation block (it has to be a pointer to a valid
+         normalisation Module).
+        :param activation: Activation block (it has to be a pointer to a valid
+         activation Module).
+        :param block: Main block. It has to be a pointer to a valid block from
+         this python file (otherwise it will fail when trying to create a
+         partial of it).
+        """
+        super().__init__()
+        # Init
+        if norm is None:
+            norm = partial(lambda ch_in: nn.Sequential())
+        if block is None:
+            block = ResConv2dBlock
+        block_partial = partial(
+            block, kernel=kernel, norm=norm, activation=activation
+        )
+        self.device = device
+        self.filters = conv_filters
+
+        conv_in, conv_out, deconv_in, deconv_out = block.compute_filters(
+            n_inputs, conv_filters
+        )
+
+        # Down path
+        # We'll use the partial and fill it with the channels for input and
+        # output for each level.
+        self.down = nn.ModuleList([
+            block_partial(f_in, f_out) for f_in, f_out in zip(
+                conv_in, conv_out
+            )
+        ])
+
+        # Bottleneck
+        self.u = block_partial(conv_filters[-2], conv_filters[-1])
+
+        # Up path
+        # Now we'll do the same we did on the down path, but mirrored. We also
+        # need to account for the skip connections, that's why we sum the
+        # channels for both outputs. That basically means that we are
+        # concatenating with the skip connection, and not suming.
+        self.up = nn.ModuleList([
+            block_partial(f_in, f_out) for f_in, f_out in zip(
+                deconv_in, deconv_out
+            )
+        ])
+
+    def encode(self, input_s):
+        # We need to keep track of the convolutional outputs, for the skip
+        # connections.
+        down_inputs = []
+        for c in self.down:
+            c.to(self.device)
+            input_s = F.dropout3d(
+                c(input_s), self.dropout, self.training
+            )
+            down_inputs.append(input_s)
+            # Remember that pooling is optional
+            input_s = F.max_pool3d(input_s, 2)
+
+        self.u.to(self.device)
+        input_s = self.u(input_s)
+
+        return down_inputs, input_s
+
+    def decode(self, input_s, down_inputs):
+        for d, i in zip(self.up, down_inputs[::-1]):
+            d.to(self.device)
+            # Remember that pooling is optional
+            input_s = F.dropout3d(
+                d(
+                    torch.cat(
+                        (F.interpolate(input_s, size=i.size()[2:]), i),
+                        dim=1
+                    )
+                ),
+                self.dropout,
+                self.training
+            )
+
+        return input_s
+
+    def forward(self, input_s, keepfeat=False):
+        down_inputs, input_s = self.encode(input_s)
+
+        features = down_inputs + [input_s] if keepfeat else []
+
+        input_s = self.decode(input_s, down_inputs)
+
+        output = (input_s, features) if keepfeat else input_s
+
+        return output
+
+
+class BaseConv2dBlock(BaseModel):
+    def __init__(self, filters_in, filters_out, kernel):
+        super().__init__()
+        self.conv = partial(
+            nn.Conv2d, kernel_size=kernel, padding=kernel // 2
+        )
+
+    def forward(self, inputs, *args, **kwargs):
+        return self.conv(inputs)
+
+    @staticmethod
+    def default_activation(n_filters):
+        return nn.ReLU()
+
+    @staticmethod
+    def compute_filters(n_inputs, conv_filters):
+        conv_in = [n_inputs] + conv_filters[:-2]
+        conv_out = conv_filters[:-1]
+        down_out = conv_filters[-2::-1]
+        up_out = conv_filters[:0:-1]
+        deconv_in = list(map(sum, zip(down_out, up_out)))
+        deconv_out = down_out
+        return conv_in, conv_out, deconv_in, deconv_out
+
+
+class ResConv2dBlock(BaseConv2dBlock):
+    def __init__(
+            self, filters_in, filters_out,
+            kernel=3, norm=None, activation=None
+    ):
+        super().__init__(filters_in, filters_out, kernel)
+        if activation is None:
+            activation = self.default_activation
+        conv = nn.Conv2d
+
+        self.conv = self.conv(filters_in, filters_out)
+
+        if filters_in != filters_out:
+            self.res = conv(
+                filters_in, filters_out, 1,
+            )
+        else:
+            self.res = None
+
+        self.end_seq = nn.Sequential(
+            activation(filters_out),
+            norm(filters_out)
+        )
+
+    def forward(self, inputs, return_linear=False, *args, **kwargs):
+        res = inputs if self.res is None else self.res(inputs)
+        data = self.conv(inputs) + res
+        if return_linear:
+            return self.end_seq(data), data
+        else:
+            return self.end_seq(data)

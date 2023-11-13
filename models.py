@@ -7,7 +7,7 @@ from torchvision.models import segmentation as seg_models
 import torch
 from torch import nn
 import torch.nn.functional as F
-from base import BaseModel
+from base import BaseModel, Autoencoder
 
 
 class Classifier(BaseModel):
@@ -784,6 +784,57 @@ class LRASPP_MobileNet(Segmenter):
     def forward(self, data):
         self.lraspp.to(self.device)
         return self.lraspp(data)['out']
+
+    def target_layer(self):
+        return self.lraspp.backbone
+
+
+class Unet2D(Segmenter):
+    def __init__(
+            self, n_inputs, n_outputs, conv_filters=None, lr=1e-3,
+            device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
+            verbose=True
+    ):
+        super().__init__(n_outputs)
+        # Init
+        self.channels = n_inputs
+        self.lr = lr
+        self.device = device
+        if conv_filters is None:
+            self.conv_filters = [32, 64, 128, 256, 512]
+        else:
+            self.conv_filters = conv_filters
+        self.epoch = 0
+        self.t_train = 0
+        self.t_val = 0
+        self.device = device
+
+        # <Parameter setup>
+        self.segmenter = nn.Sequential(
+            Autoencoder(
+                self.conv_filters, device, n_inputs
+            ),
+            nn.Conv3d(self.conv_filters[0], 1, 1)
+        )
+        self.segmenter.to(device)
+
+        # <Optimizer setup>
+        # We do this last step after all parameters are defined
+        model_params = filter(lambda p: p.requires_grad, self.parameters())
+        self.optimizer_alg = torch.optim.Adam(model_params, lr=self.lr)
+        if verbose > 1:
+            print(
+                'Network created on device {:} with training losses '
+                '[{:}] and validation losses [{:}]'.format(
+                    self.device,
+                    ', '.join([tf['name'] for tf in self.train_functions]),
+                    ', '.join([vf['name'] for vf in self.val_functions])
+                )
+            )
+
+    def forward(self, data):
+        self.segmenter.to(self.device)
+        return self.segmenter(data)
 
     def target_layer(self):
         return self.lraspp.backbone
