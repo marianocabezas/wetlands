@@ -608,7 +608,7 @@ class Autoencoder(BaseModel):
             input_s = c(input_s)
             down_inputs.append(input_s)
             # Remember that pooling is optional
-            input_s = F.max_pool3d(input_s, 2)
+            input_s = F.max_pool2d(input_s, 2)
 
         self.u.to(self.device)
         input_s = self.u(input_s)
