@@ -158,3 +158,16 @@ def get_int(string):
     :return: int number
     """
     return int(''.join(filter(str.isdigit, string)))
+
+
+def normalise(image):
+    """
+    Function to normalise an image given its mean and standard deviation
+     (z-score).
+    :param image:  Image to normalise.
+    :return:
+    """
+    im_mean = np.mean(image, axis=(1, 2), keepdims=True)
+    im_std = np.std(image, axis=(1, 2), keepdims=True)
+
+    return (image - im_mean) / im_std

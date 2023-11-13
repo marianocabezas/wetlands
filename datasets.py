@@ -8,6 +8,7 @@ import xml.etree.ElementTree as et
 from skimage import io as skio
 from skimage.util.shape import view_as_blocks
 from torch.utils.data.dataset import Dataset
+from utils import  normalise
 
 
 ''' Utility function for patch creation '''
@@ -114,7 +115,6 @@ class RumexDataset(Dataset):
     """
     def __init__(self, path, basenames, patch_size, norm=True):
         patch_list = []
-        alpha_list = []
         label_list = []
         for base_filename in basenames:
             # parse xml file of 'base_filename' and get image metadata info
@@ -381,93 +381,118 @@ class RumexTestDataset(Dataset):
 
 
 # Segmentation datasets
-class BalancedWetlandsDataset(Dataset):
+class MosaicDataset(Dataset):
     """
-    Dataset that uses a preloaded tensor with natural images, including
-    classification labels.
+        Dataset that receives a list of mosaics of natural images and a
+        semantic segmentation mask (multi-class or binary).
     """
-    def __init__(self, mosaic, mask, patch_size, overlap, norm=True):
+    def __init__(
+        self, mosaics, masks, patch_size, overlap, norm=True, segmentation=True
+    ):
+        # Init
+        self.segmentation = segmentation
         if norm:
-            im_mean = np.mean(mosaic, axis=(1, 2), keepdims=True)
-            im_std = np.std(mosaic, axis=(1, 2), keepdims=True)
-            self.mosaic = (mosaic - im_mean) / im_std
+            self.mosaics = [normalise(mosaic_i) for mosaic_i in mosaics]
         else:
-            self.mosaic = mosaic
-        self.mask = mask
-        patches = get_slices(
-            [mask], (patch_size, patch_size),
+            self.mosaics = mosaics
+        slices = get_slices(
+            masks, (patch_size, patch_size),
             (overlap, overlap)
-        )[0]
+        )
 
-        patch_slices = [s for s in patches if np.sum(mask[s]) > 0]
-        bck_slices = [s for s in patches if np.sum(mask[s]) == 0]
-        n_positives = len(patch_slices)
-        n_negatives = len(bck_slices)
+        # We use the old tuple trick of storing the patch slice and the image
+        # it belongs to. This converts a list of list into a single list which
+        # is easier to navigate and iterate.
+        self.patches = [
+            (s, i) for i, (label, s_i) in enumerate(zip(slices)) for s in s_i
+        ]
 
-        positive_imbalance = n_positives > n_negatives
+        self.classes = np.unique([np.unique(mask_i) for mask_i in masks])
 
-        if positive_imbalance:
-            self.majority = patch_slices
-            self.minority = bck_slices
+        if segmentation:
+            self.labels = masks
         else:
-            self.majority = bck_slices
-            self.minority = patch_slices
-
-        self.current_majority = deepcopy(self.majority)
-        self.current_minority = deepcopy(self.minority)
+            self.labels = [
+                np.argmax([
+                    np.sum(masks[i][s] == k)
+                    for k in range(self.classes)
+                ])
+                for s, i in self.patches
+            ]
 
     def __getitem__(self, index):
-        if index < len(self.minority):
-            index = np.random.randint(len(self.current_minority))
-            patch = self.current_minority.pop(index)
-            if len(self.current_minority) == 0:
-                self.current_minority = deepcopy(self.minority)
-        else:
-            index = np.random.randint(len(self.current_majority))
-            patch = self.current_majority.pop(index)
-            if len(self.current_majority) == 0:
-                self.current_majority = deepcopy(self.majority)
-        x = self.mosaic[(slice(None),) + patch].astype(np.float32)
-        y = self.mask[patch].astype(np.int_)
+        s, i = self.patches[index]
+        x = self.mosaic[i][(slice(None),) + s].astype(np.float32)
+        y = self.labels[i][s].astype(np.int_)
 
         return x, y
 
     def __len__(self):
-        return len(self.minority) * 2
+        return len(self.patches)
 
 
-class BalancedMulticlassWetlandsDataset(Dataset):
+class ImagesDataset(Dataset):
     """
-    Dataset that uses a preloaded tensor with natural images, including
-    classification labels.
+        Dataset that receives a list of images of natural images and a
+        semantic segmentation mask (multi-class or binary).
     """
-    def __init__(self, mosaic, mask, patch_size, overlap, norm=True):
+    def __init__(
+        self, images, masks,  norm=True, segmentation=True
+    ):
+        # Init
+        self.segmentation = segmentation
         if norm:
-            im_mean = np.mean(mosaic, axis=(1, 2), keepdims=True)
-            im_std = np.std(mosaic, axis=(1, 2), keepdims=True)
-            self.mosaic = (mosaic - im_mean) / im_std
+            self.images = [normalise(image_i) for image_i in images]
         else:
-            self.mosaic = mosaic
-        self.mask = mask
-        self.patches = get_slices(
-            [mask], (patch_size, patch_size),
-            (overlap, overlap)
-        )[0]
+            self.images = images
 
-        classes = np.unique(mask)
+        self.classes = np.unique([np.unique(mask_i) for mask_i in masks])
 
-        class_counts = np.array([0 for _ in classes])
-        for patch in self.patches:
-            class_counts[np.unique(mask[patch])] += 1
+        if segmentation:
+            self.labels = masks
+        else:
+            self.labels = [
+                np.argmax([np.sum(mask_i == k) for k in range(self.classes)])
+                for mask_i in masks
+            ]
+
+    def __getitem__(self, index):
+        x = self.images[index].astype(np.float32)
+        y = self.labels[index].astype(np.int_)
+
+        return x, y
+
+    def __len__(self):
+        return len(self.patches)
+
+
+class BalancedMosaicDataset(MosaicDataset):
+    """
+        Dataset that receives a list of mosaics of natural images and a
+        semantic segmentation mask (multi-class or binary).
+        Specifically, there is a focus on trying to balance the number of
+        patches for each class. In multi-class scenarios (patches with
+        multiple classes) it does not necessarily guarantee a balanced
+        dataset.
+    """
+    def __init__(
+        self, mosaics, masks, patch_size, overlap, norm=True, segmentation=True
+    ):
+        super().__init__(
+            mosaics, masks, patch_size, overlap, norm, segmentation
+        )
+
+        class_counts = np.array([0 for _ in self.classes])
+        for s, i in self.patches:
+            class_counts[np.unique(masks[i][s])] += 1
 
         self.minimum_count = np.min(class_counts)
         min_classes = np.argsort(class_counts)
-        self.n_classes = len(min_classes)
         self.class_indices = [
             [
-                p_j for p_j, patch in enumerate(self.patches)
-                if k in mask[patch] and
-                not np.any(np.isin(mask[patch], min_classes[:k_i]))
+                p_j for p_j, (s, i) in enumerate(self.patches)
+                if k in masks[i][s] and
+                not np.any(np.isin(masks[i][s], min_classes[:k_i]))
             ]
             for k_i, k in enumerate(min_classes)
         ]
@@ -477,14 +502,14 @@ class BalancedMulticlassWetlandsDataset(Dataset):
         ]
 
     def __getitem__(self, index):
-        k = index % self.n_classes
+        k = index % len(self.classes)
         k_indices = self.current_indices[k]
         index = np.random.randint(len(k_indices))
-        patch = self.patches[k_indices.pop(index)]
+        s, i = self.patches[k_indices.pop(index)]
         if len(k_indices) == 0:
             self.current_indices[k] = deepcopy(self.class_indices[k])
-        x = self.mosaic[(slice(None),) + patch].astype(np.float32)
-        y = self.mask[patch].astype(np.int_)
+        x = self.mosaic[i][(slice(None),) + s].astype(np.float32)
+        y = self.mask[i][s].astype(np.int_)
 
         return x, y
 
@@ -492,30 +517,53 @@ class BalancedMulticlassWetlandsDataset(Dataset):
         return self.minimum_count * self.n_classes
 
 
-class WetlandsDataset(Dataset):
+class BalancedImagesDataset(ImagesDataset):
     """
-    Dataset that uses a preloaded tensor with natural images, including
-    classification labels.
+        Dataset that receives a list of mosaics of natural images and a
+        semantic segmentation mask (multi-class or binary).
+        Specifically, there is a focus on trying to balance the number of
+        patches for each class. In multi-class scenarios (patches with
+        multiple classes) it does not necessarily guarantee a balanced
+        dataset.
     """
-    def __init__(self, mosaic, labels, patch_size, overlap, norm=True):
-        if norm:
-            im_mean = np.mean(mosaic, axis=(1, 2), keepdims=True)
-            im_std = np.std(mosaic, axis=(1, 2), keepdims=True)
-            self.mosaic = (mosaic - im_mean) / im_std
-        else:
-            self.mosaic = mosaic
-        self.labels = labels
-        self.patches = get_slices(
-            [labels], (patch_size, patch_size),
-            (overlap, overlap)
-        )[0]
+
+    def __init__(
+            self, mosaics, masks, norm=True, segmentation=True
+    ):
+        super().__init__(
+            mosaics, masks, norm, segmentation
+        )
+
+        class_counts = np.array([0 for _ in self.classes])
+        for mask_i in self.labels:
+            class_counts[np.unique(mask_i)] += 1
+
+        self.minimum_count = np.min(class_counts)
+        min_classes = np.argsort(class_counts)
+        self.class_indices = [
+            [
+                m_j for m_j, mask_i in enumerate(self.labels)
+                if k in mask_i and
+                not np.any(np.isin(mask_i, min_classes[:k_i]))
+            ]
+            for k_i, k in enumerate(min_classes)
+        ]
+
+        self.current_indices = [
+            deepcopy(indices) for indices in self.class_indices
+        ]
 
     def __getitem__(self, index):
-        patch = self.patches[index]
-        x = self.mosaic[(slice(None),) + patch].astype(np.float32)
-        y = self.labels[patch].astype(np.int_)
+        k = index % len(self.classes)
+        k_indices = self.current_indices[k]
+        index = np.random.randint(len(k_indices))
+        true_index = k_indices.pop(index)
+        if len(k_indices) == 0:
+            self.current_indices[k] = deepcopy(self.class_indices[k])
+        x = self.mosaic[true_index].astype(np.float32)
+        y = self.mask[true_index].astype(np.int_)
 
         return x, y
 
     def __len__(self):
-        return len(self.patches)
+        return self.minimum_count * self.n_classes
