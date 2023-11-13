@@ -489,7 +489,7 @@ class BalancedMulticlassWetlandsDataset(Dataset):
         return x, y
 
     def __len__(self):
-        return len(self.minimum_count) * self.n_classes
+        return self.minimum_count * self.n_classes
 
 
 class WetlandsDataset(Dataset):
