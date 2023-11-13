@@ -549,6 +549,69 @@ class FCN_ResNet50(Segmenter):
         return self.fcn.backbone
 
 
+class FCN_ResNet101(Segmenter):
+    def __init__(
+        self, n_inputs, n_outputs, pretrained=False, lr=1e-3,
+        device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
+        verbose=True
+    ):
+        super().__init__(n_outputs)
+        # Init
+        self.channels = n_inputs
+        self.lr = lr
+        self.device = device
+        if pretrained:
+            try:
+                weights = models.segmentation.FCN_ResNet101_Weights.DEFAULT
+                self.fcn = models.segmentation.fcn_resnet101(weights=weights)
+            except TypeError:
+                self.fcn = models.segmentation.fcn_resnet101(pretrained)
+        else:
+            self.fcn = models.segmentation.fcn_resnet101()
+        if n_inputs > 3:
+            conv_input = nn.Conv2d(
+                n_inputs, 64, kernel_size=7, stride=2, padding=3, bias=False
+            )
+            # We assume that RGB channels will be the first 3
+            conv_input.weight.data[:, :3, ...].copy_(
+                self.fcn.backbone.conv1.weight.data
+            )
+            self.fcn.backbone.conv1 = conv_input
+        elif n_inputs < 3:
+            self.fcn.backbone.conv1 = nn.Conv2d(
+                n_inputs, 64, kernel_size=7, stride=2, padding=3, bias=False
+            )
+        self.last_features = self.fcn.classifier[-1].in_channels
+        self.fcn.classifier[-1] = nn.Conv2d(
+            self.last_features, n_outputs, kernel_size=1, stride=1
+        )
+        self.aux_last_features = self.fcn.aux_classifier[-1].in_channels
+        self.fcn.aux_classifier[-1] = nn.Conv2d(
+            self.aux_last_features, n_outputs, kernel_size=1, stride=1
+        )
+
+        # <Optimizer setup>
+        # We do this last step after all parameters are defined
+        model_params = filter(lambda p: p.requires_grad, self.parameters())
+        self.optimizer_alg = torch.optim.Adam(model_params, lr=self.lr)
+        if verbose > 1:
+            print(
+                'Network created on device {:} with training losses '
+                '[{:}] and validation losses [{:}]'.format(
+                    self.device,
+                    ', '.join([tf['name'] for tf in self.train_functions]),
+                    ', '.join([vf['name'] for vf in self.val_functions])
+                )
+            )
+
+    def forward(self, data):
+        self.fcn.to(self.device)
+        return self.fcn(data)['out']
+
+    def target_layer(self):
+        return self.fcn.backbone
+
+
 class DeeplabV3_MobileNet(Segmenter):
     def __init__(
         self, n_inputs, n_outputs, pretrained=False, lr=1e-3,
