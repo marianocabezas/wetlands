@@ -155,7 +155,6 @@ class RumexDataset(Dataset):
                 im_mean = np.mean(im, axis=(1, 2), keepdims=True)
                 im_std = np.std(im, axis=(1, 2), keepdims=True)
                 im_norm = (im - im_mean) / im_std
-                im_norm = im / 255
                 im_patches = np.squeeze(
                     view_as_blocks(im_norm, (3, patch_size, patch_size))
                 )
@@ -285,7 +284,6 @@ class RumexTestDataset(Dataset):
                 im_mean = np.mean(im, axis=(1, 2), keepdims=True)
                 im_std = np.std(im, axis=(1, 2), keepdims=True)
                 im_norm = (im - im_mean) / im_std
-                im_norm = im / 255
                 self.images.append(
                     np.moveaxis(
                         np.pad(
@@ -382,37 +380,8 @@ class RumexTestDataset(Dataset):
         return len(self.patches)
 
 
-# Lythrum dataset
-class LythrumDataset(Dataset):
-    """
-    Dataset that uses a preloaded tensor with natural images, including
-    classification labels.
-    """
-    def __init__(self, mosaic, mask, patch_size, norm=True):
-        if norm:
-            im_mean = np.mean(mosaic, axis=(1, 2), keepdims=True)
-            im_std = np.std(mosaic, axis=(1, 2), keepdims=True)
-            self.mosaic = (mosaic - im_mean) / im_std
-        else:
-            self.mosaic = mosaic
-        self.mask = mask
-        self.patches = get_slices(
-            [mask], (patch_size, patch_size),
-            (patch_size // 2, patch_size // 2)
-        )[0]
-
-    def __getitem__(self, index):
-        patch = self.patches[index]
-        x = self.mosaic[(slice(None),) + patch].astype(np.float32)
-        y = self.mask[patch].astype(np.int_)
-
-        return x, y
-
-    def __len__(self):
-        return len(self.patches)
-
-
-class BalancedLythrumDataset(Dataset):
+# Segmentation datasets
+class BalancedWetlandsDataset(Dataset):
     """
     Dataset that uses a preloaded tensor with natural images, including
     classification labels.
@@ -465,3 +434,32 @@ class BalancedLythrumDataset(Dataset):
 
     def __len__(self):
         return len(self.minority) * 2
+
+
+class WetlandsDataset(Dataset):
+    """
+    Dataset that uses a preloaded tensor with natural images, including
+    classification labels.
+    """
+    def __init__(self, mosaic, labels, patch_size, norm=True):
+        if norm:
+            im_mean = np.mean(mosaic, axis=(1, 2), keepdims=True)
+            im_std = np.std(mosaic, axis=(1, 2), keepdims=True)
+            self.mosaic = (mosaic - im_mean) / im_std
+        else:
+            self.mosaic = mosaic
+        self.labels = labels
+        self.patches = get_slices(
+            [labels], (patch_size, patch_size),
+            (patch_size // 2, patch_size // 2)
+        )[0]
+
+    def __getitem__(self, index):
+        patch = self.patches[index]
+        x = self.mosaic[(slice(None),) + patch].astype(np.float32)
+        y = self.labels[patch].astype(np.int_)
+
+        return x, y
+
+    def __len__(self):
+        return len(self.patches)
