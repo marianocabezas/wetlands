@@ -436,6 +436,62 @@ class BalancedWetlandsDataset(Dataset):
         return len(self.minority) * 2
 
 
+class BalancedMulticlassWetlandsDataset(Dataset):
+    """
+    Dataset that uses a preloaded tensor with natural images, including
+    classification labels.
+    """
+    def __init__(self, mosaic, mask, patch_size, overlap, norm=True):
+        if norm:
+            im_mean = np.mean(mosaic, axis=(1, 2), keepdims=True)
+            im_std = np.std(mosaic, axis=(1, 2), keepdims=True)
+            self.mosaic = (mosaic - im_mean) / im_std
+        else:
+            self.mosaic = mosaic
+        self.mask = mask
+        self.patches = get_slices(
+            [mask], (patch_size, patch_size),
+            (overlap, overlap)
+        )[0]
+
+        classes = np.unique(mask)
+
+        class_counts = np.array([0 for _ in classes])
+        for patch in self.patches:
+            class_counts[np.unique(mask[patch])] += 1
+
+        self.minimum_count = np.min(class_counts)
+        min_classes = np.argsort(class_counts)
+        self.n_classes = len(min_classes)
+        self.class_indices = [
+            [
+                p_j for p_j, patch in enumerate(self.patches)
+                if k in mask[patch] and
+                not np.any(np.isin(mask[patch], min_classes[:k_i]))
+            ]
+            for k_i, k in enumerate(min_classes)
+        ]
+
+        self.current_indices = [
+            deepcopy(indices) for indices in self.class_indices
+        ]
+
+    def __getitem__(self, index):
+        k = index % self.n_classes
+        k_indices = self.current_indices[k]
+        index = np.random.randint(len(k_indices))
+        patch = self.patches[k_indices.pop(index)]
+        if len(k_indices) == 0:
+            self.current_indices[k] = deepcopy(self.class_indices[k])
+        x = self.mosaic[(slice(None),) + patch].astype(np.float32)
+        y = self.mask[patch].astype(np.int_)
+
+        return x, y
+
+    def __len__(self):
+        return len(self.minimum_count) * self.n_classes
+
+
 class WetlandsDataset(Dataset):
     """
     Dataset that uses a preloaded tensor with natural images, including
