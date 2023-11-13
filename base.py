@@ -605,9 +605,7 @@ class Autoencoder(BaseModel):
         down_inputs = []
         for c in self.down:
             c.to(self.device)
-            input_s = F.dropout3d(
-                c(input_s), self.dropout, self.training
-            )
+            input_s = c(input_s)
             down_inputs.append(input_s)
             # Remember that pooling is optional
             input_s = F.max_pool3d(input_s, 2)
@@ -621,15 +619,11 @@ class Autoencoder(BaseModel):
         for d, i in zip(self.up, down_inputs[::-1]):
             d.to(self.device)
             # Remember that pooling is optional
-            input_s = F.dropout3d(
-                d(
-                    torch.cat(
-                        (F.interpolate(input_s, size=i.size()[2:]), i),
-                        dim=1
-                    )
-                ),
-                self.dropout,
-                self.training
+            input_s = d(
+                torch.cat(
+                    (F.interpolate(input_s, size=i.size()[2:]), i),
+                    dim=1
+                )
             )
 
         return input_s
