@@ -80,7 +80,7 @@ class Segmenter(BaseModel):
         self.val_functions = [
             {
                 'name': 'xent',
-                'weight': 0,
+                'weight': 1,
                 'f': F.cross_entropy
             },
 
