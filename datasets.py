@@ -558,7 +558,7 @@ class BalancedImagesDataset(ImagesDataset):
         true_index = k_indices.pop(index)
         if len(k_indices) == 0:
             self.current_indices[k] = deepcopy(self.class_indices[k])
-        x = self.mosaics[true_index].astype(np.float32)
+        x = self.images[true_index].astype(np.float32)
         y = self.labels[true_index].astype(np.int_)
 
         return x, y
