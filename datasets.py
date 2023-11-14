@@ -404,7 +404,7 @@ class MosaicDataset(Dataset):
         # it belongs to. This converts a list of list into a single list which
         # is easier to navigate and iterate.
         self.patches = [
-            (s, i) for i, (label, s_i) in enumerate(zip(slices)) for s in s_i
+            (s, i) for i, (label, s_i) in enumerate(slices) for s in s_i
         ]
 
         self.classes = np.unique([np.unique(mask_i) for mask_i in masks])
