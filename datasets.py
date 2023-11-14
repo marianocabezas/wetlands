@@ -420,7 +420,7 @@ class MosaicDataset(Dataset):
 
     def __getitem__(self, index):
         s, i = self.patches[index]
-        x = self.mosaic[i][(slice(None),) + s].astype(np.float32)
+        x = self.mosaics[i][(slice(None),) + s].astype(np.float32)
         y = self.labels[i][s].astype(np.int_)
 
         return x, y
@@ -506,8 +506,8 @@ class BalancedMosaicDataset(MosaicDataset):
         s, i = self.patches[k_indices.pop(index)]
         if len(k_indices) == 0:
             self.current_indices[k] = deepcopy(self.class_indices[k])
-        x = self.mosaic[i][(slice(None),) + s].astype(np.float32)
-        y = self.mask[i][s].astype(np.int_)
+        x = self.mosaics[i][(slice(None),) + s].astype(np.float32)
+        y = self.labels[i][s].astype(np.int_)
 
         return x, y
 
