@@ -461,7 +461,7 @@ class ImagesDataset(Dataset):
         return x, y
 
     def __len__(self):
-        return len(self.masks)
+        return len(self.labels)
 
 
 class BalancedMosaicDataset(MosaicDataset):
@@ -564,4 +564,4 @@ class BalancedImagesDataset(ImagesDataset):
         return x, y
 
     def __len__(self):
-        return self.minimum_count * self.n_classes
+        return self.minimum_count * len(self.classes)
