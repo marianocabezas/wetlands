@@ -512,7 +512,7 @@ class BalancedMosaicDataset(MosaicDataset):
         return x, y
 
     def __len__(self):
-        return self.minimum_count * self.n_classes
+        return self.minimum_count * len(self.classes)
 
 
 class BalancedImagesDataset(ImagesDataset):
