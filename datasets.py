@@ -558,6 +558,7 @@ class BalancedImagesDataset(ImagesDataset):
         true_index = k_indices.pop(index)
         if len(k_indices) == 0:
             self.current_indices[k] = deepcopy(self.class_indices[k])
+        print(true_index, len(self.images), len(self.labels))
         x = self.images[true_index].astype(np.float32)
         y = self.labels[true_index].astype(np.int_)
 
