@@ -405,9 +405,7 @@ class MosaicDataset(Dataset):
         # is easier to navigate and iterate.
         self.patches = [(s, i) for i, s_i in enumerate(slices) for s in s_i]
 
-        self.classes = np.unique([
-            k for mask_i in masks for k in np.unique(mask_i)
-        ])
+        self.classes = np.unique(masks)
 
         if segmentation:
             self.labels = masks
@@ -446,9 +444,7 @@ class ImagesDataset(Dataset):
         else:
             self.images = images
 
-        self.classes = np.unique([
-            k for mask_i in masks for k in np.unique(mask_i)
-        ])
+        self.classes = np.unique(masks)
 
         if segmentation:
             self.labels = masks
