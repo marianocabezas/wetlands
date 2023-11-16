@@ -762,7 +762,7 @@ class LRASPP_MobileNet(Segmenter):
             getattr(self.lraspp.backbone, '0')[0] = nn.Conv2d(
                 n_inputs, 16, kernel_size=3, stride=2, padding=1, bias=False
             )
-        self.last_features = self.dl3.classifier[-1].in_channels
+        self.last_features = self.lraspp.classifier[-1].in_channels
         self.lraspp.classifier[-1] = nn.Conv2d(
             self.last_features, n_outputs, kernel_size=1, stride=1
         )
