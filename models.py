@@ -692,7 +692,7 @@ class DeeplabV3_ResNet50(Segmenter):
             self.dl3 = seg_models.deeplabv3_resnet50()
         if n_inputs > 3:
             conv_input = nn.Conv2d(
-                n_inputs, 16, kernel_size=7, stride=2, padding=3, bias=False
+                n_inputs, 64, kernel_size=7, stride=2, padding=3, bias=False
             )
             # We assume that RGB channels will be the first 3
             conv_input.weight.data[:, :3, ...].copy_(
@@ -701,7 +701,7 @@ class DeeplabV3_ResNet50(Segmenter):
             self.dl3.backbone.conv1 = conv_input
         elif n_inputs < 3:
             self.dl3.backbone.conv1 = nn.Conv2d(
-                n_inputs, 16, kernel_size=7, stride=2, padding=3, bias=False
+                n_inputs, 64, kernel_size=7, stride=2, padding=3, bias=False
             )
         self.last_features = self.dl3.classifier[-1].in_channels
         self.dl3.classifier[-1] = nn.Conv2d(
