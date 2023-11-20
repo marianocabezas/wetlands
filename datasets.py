@@ -387,7 +387,8 @@ class MosaicDataset(Dataset):
         semantic segmentation mask (multi-class or binary).
     """
     def __init__(
-        self, mosaics, masks, patch_size, overlap, norm=True, segmentation=True
+        self, mosaics, masks, patch_size, overlap, rois=None,
+        norm=True, segmentation=True
     ):
         # Init
         self.segmentation = segmentation
@@ -395,6 +396,7 @@ class MosaicDataset(Dataset):
             self.mosaics = [normalise(mosaic_i) for mosaic_i in mosaics]
         else:
             self.mosaics = mosaics
+        self.rois = rois
         slices = get_slices(
             masks, (patch_size, patch_size),
             (overlap, overlap)
@@ -422,6 +424,9 @@ class MosaicDataset(Dataset):
         s, i = self.patches[index]
         x = self.mosaics[i][(slice(None),) + s].astype(np.float32)
         y = self.labels[i][s].astype(np.int_)
+        if self.rois is not None:
+            roi = self.rois[i][s].astype(bool)
+            y = (y, roi)
 
         return x, y
 
@@ -435,7 +440,7 @@ class ImagesDataset(Dataset):
         semantic segmentation mask (multi-class or binary).
     """
     def __init__(
-        self, images, masks, norm=True, segmentation=True
+        self, images, masks, rois=None, norm=True, segmentation=True
     ):
         # Init
         self.segmentation = segmentation
@@ -443,6 +448,7 @@ class ImagesDataset(Dataset):
             self.images = [normalise(image_i) for image_i in images]
         else:
             self.images = images
+        self.rois = rois
 
         self.classes = np.unique(masks)
 
@@ -457,6 +463,9 @@ class ImagesDataset(Dataset):
     def __getitem__(self, index):
         x = self.images[index].astype(np.float32)
         y = self.labels[index].astype(np.int_)
+        if self.rois is not None:
+            roi = self.rois[index].astype(bool)
+            y = (y, roi)
 
         return x, y
 
@@ -474,10 +483,11 @@ class BalancedMosaicDataset(MosaicDataset):
         dataset.
     """
     def __init__(
-        self, mosaics, masks, patch_size, overlap, norm=True, segmentation=True
+        self, mosaics, masks, patch_size, overlap, rois=None,
+        norm=True, segmentation=True
     ):
         super().__init__(
-            mosaics, masks, patch_size, overlap, norm, segmentation
+            mosaics, masks, patch_size, overlap, rois, norm, segmentation
         )
 
         class_counts = np.array([0 for _ in self.classes])
@@ -503,13 +513,10 @@ class BalancedMosaicDataset(MosaicDataset):
         k = index % len(self.classes)
         k_indices = self.current_indices[k]
         index = np.random.randint(len(k_indices))
-        s, i = self.patches[k_indices.pop(index)]
+        true_index = k_indices.pop(index)
         if len(k_indices) == 0:
             self.current_indices[k] = deepcopy(self.class_indices[k])
-        x = self.mosaics[i][(slice(None),) + s].astype(np.float32)
-        y = self.labels[i][s].astype(np.int_)
-
-        return x, y
+        return super().__getitem__(true_index)
 
     def __len__(self):
         return self.minimum_count * len(self.classes)
@@ -526,10 +533,10 @@ class BalancedImagesDataset(ImagesDataset):
     """
 
     def __init__(
-            self, mosaics, masks, norm=True, segmentation=True
+            self, mosaics, masks, rois=None, norm=True, segmentation=True
     ):
         super().__init__(
-            mosaics, masks, norm, segmentation
+            mosaics, masks, rois, norm, segmentation
         )
 
         class_counts = np.array([0 for _ in self.classes])
@@ -558,10 +565,7 @@ class BalancedImagesDataset(ImagesDataset):
         true_index = k_indices.pop(index)
         if len(k_indices) == 0:
             self.current_indices[k] = deepcopy(self.class_indices[k])
-        x = self.images[true_index].astype(np.float32)
-        y = self.labels[true_index].astype(np.int_)
-
-        return x, y
+        return super().__getitem__(true_index)
 
     def __len__(self):
         return self.minimum_count * len(self.classes)
