@@ -73,7 +73,7 @@ class Segmenter(BaseModel):
             {
                 'name': 'xentropy',
                 'weight': 1,
-                'f': F.cross_entropy
+                'f': self._cross_entropy
             }
         ]
 
@@ -81,7 +81,7 @@ class Segmenter(BaseModel):
             {
                 'name': 'xent',
                 'weight': 1,
-                'f': F.cross_entropy
+                'f': self._cross_entropy
             },
 
             {
@@ -95,6 +95,16 @@ class Segmenter(BaseModel):
                 'f': self._mean_iou
             },
         ]
+
+    def _cross_entropy(self, predicted, target):
+        try:
+            target, roi = target
+            predicted = predicted[roi]
+            target = target[roi]
+        except ValueError:
+            pass
+
+        return F.cross_entropy(predicted, target)
 
     def _dsc_loss(self, predicted, target):
         try:
