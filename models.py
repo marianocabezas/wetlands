@@ -100,13 +100,12 @@ class Segmenter(BaseModel):
         try:
             target, roi = target
             predicted = torch.cat([
-                p_i[roi] for p_i in torch.split(predicted, dim=1)
+                p_i.squeeze(1)[roi]
+                for p_i in torch.split(predicted, 1, dim=1)
             ])
             target = target[roi]
         except ValueError:
             pass
-
-        print(predicted.shape, target.shape)
 
         return F.cross_entropy(predicted, target)
 
