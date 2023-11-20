@@ -512,7 +512,7 @@ class BalancedMosaicDataset(MosaicDataset):
             for k_i, k in enumerate(min_classes)
         ]
 
-        print(class_indices)
+        print(self.class_indices)
         self.current_indices = [
             deepcopy(indices) for indices in self.class_indices
         ]
