@@ -411,7 +411,7 @@ class MosaicDataset(Dataset):
         else:
             self.patches = [
                 (s, i) for i, (s_i, roi) in enumerate(zip(slices, rois))
-                for s in s_i if np.any(roi[s_i])
+                for s in s_i if np.any(roi[s])
             ]
 
         self.classes = np.unique(masks)
