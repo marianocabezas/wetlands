@@ -405,7 +405,14 @@ class MosaicDataset(Dataset):
         # We use the old tuple trick of storing the patch slice and the image
         # it belongs to. This converts a list of list into a single list which
         # is easier to navigate and iterate.
-        self.patches = [(s, i) for i, s_i in enumerate(slices) for s in s_i]
+        patches = [(s, i) for i, s_i in enumerate(slices) for s in s_i]
+        if rois is None:
+            self.patches = patches
+        else:
+            self.patches = [
+                (s, i) for i, (s_i, roi) in enumerate(slices, rois)
+                for s in s_i if np.any(roi[s_i])
+            ]
 
         self.classes = np.unique(masks)
 
@@ -505,6 +512,7 @@ class BalancedMosaicDataset(MosaicDataset):
             for k_i, k in enumerate(min_classes)
         ]
 
+        print(class_indices)
         self.current_indices = [
             deepcopy(indices) for indices in self.class_indices
         ]

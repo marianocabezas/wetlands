@@ -97,8 +97,13 @@ class Segmenter(BaseModel):
         ]
 
     def _dsc_loss(self, predicted, target):
-        p = torch.flatten(torch.argmax(predicted, dim=1), start_dim=1)
-        t = torch.flatten(target, start_dim=1).to(predicted.device)
+        try:
+            target, roi = target
+            p = torch.argmax(predicted, dim=1)[roi]
+            t = target[roi].to(predicted.device)
+        except ValueError:
+            p = torch.flatten(torch.argmax(predicted, dim=1), start_dim=1)
+            t = torch.flatten(target, start_dim=1).to(predicted.device)
         intersection = torch.stack([
             2 * torch.sum(
                 (p == label).type_as(p) * (t == label).type_as(p),
@@ -124,8 +129,13 @@ class Segmenter(BaseModel):
         return torch.clamp(dsc, 0., 1.)
 
     def _mean_iou(self, predicted, target):
-        p = torch.flatten(torch.argmax(predicted, dim=1), start_dim=1)
-        t = torch.flatten(target, start_dim=1).to(predicted.device)
+        try:
+            target, roi = target
+            p = torch.argmax(predicted, dim=1)[roi]
+            t = target[roi].to(predicted.device)
+        except ValueError:
+            p = torch.flatten(torch.argmax(predicted, dim=1), start_dim=1)
+            t = torch.flatten(target, start_dim=1).to(predicted.device)
         intersection = torch.stack([
             torch.sum(
                 torch.logical_and(p == label, t == label).type_as(p), dim=1
