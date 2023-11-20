@@ -113,7 +113,6 @@ class Segmenter(BaseModel):
         try:
             target, roi = target
             p = torch.argmax(predicted, dim=1)
-            t = target.to(predicted.device)
             intersection = torch.stack([
                 torch.stack([
                     torch.sum(
@@ -142,7 +141,6 @@ class Segmenter(BaseModel):
         try:
             target, roi = target
             p = torch.argmax(predicted, dim=1)
-            t = target.to(predicted.device)
             union = torch.stack([
                 torch.stack([
                     torch.sum(
@@ -171,7 +169,6 @@ class Segmenter(BaseModel):
         try:
             target, roi = target
             p = torch.argmax(predicted, dim=1)
-            t = target.to(predicted.device)
             sum_pred = torch.stack([
                 torch.stack([
                     torch.sum((p_i[r_i] == label).type_as(p))
@@ -188,7 +185,7 @@ class Segmenter(BaseModel):
             ])
         except ValueError:
             p = torch.flatten(torch.argmax(predicted, dim=1), start_dim=1)
-            t = torch.flatten(target, start_dim=1).to(predicted.device)
+            t = torch.flatten(target, start_dim=1)
             sum_pred = torch.stack([
                 torch.sum((p == label).type_as(p), dim=1)
                 for label in range(self.n_classes)
