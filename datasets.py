@@ -422,7 +422,6 @@ class MosaicDataset(Dataset):
 
     def __getitem__(self, index):
         s, i = self.patches[index]
-        print(i, len(self.mosaics))
         x = self.mosaics[i][(slice(None),) + s].astype(np.float32)
         y = self.labels[i][s].astype(np.int_)
         if self.rois is not None:
