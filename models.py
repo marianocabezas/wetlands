@@ -109,64 +109,117 @@ class Segmenter(BaseModel):
 
         return F.cross_entropy(predicted, target)
 
-    def _dsc_loss(self, predicted, target):
+    def _intersection(self, predicted, target):
         try:
             target, roi = target
-            p = torch.argmax(predicted, dim=1)[roi]
-            t = target[roi].to(predicted.device)
+            p = torch.argmax(predicted, dim=1)
+            t = target.to(predicted.device)
+            intersection = torch.stack([
+                torch.stack([
+                    torch.sum(
+                        torch.logical_and(
+                            p_i[r_i] == label, t_i[r_i] == label
+                        ).type_as(p)
+                    )
+                    for label in range(self.n_classes)
+                ])
+                for p_i, t_i, r_i in zip(p, target, roi)
+            ])
         except ValueError:
             p = torch.flatten(torch.argmax(predicted, dim=1), start_dim=1)
             t = torch.flatten(target, start_dim=1).to(predicted.device)
-        intersection = torch.stack([
-            2 * torch.sum(
-                (p == label).type_as(p) * (t == label).type_as(p),
-                dim=1
-            )
-            for label in range(self.n_classes)
-        ])
-        sum_pred = torch.stack([
-            torch.sum((p == label).type_as(p), dim=1)
-            for label in range(self.n_classes)
-        ])
-        sum_target = torch.stack([
-            torch.sum((t == label).type_as(p), dim=1)
-            for label in range(self.n_classes)
-        ])
-        dsc_k = torch.mean(intersection / (sum_pred + sum_target), dim=0)
-        dsc_k = dsc_k[torch.logical_not(torch.isnan(dsc_k))]
+            intersection = torch.stack([
+                torch.sum(
+                    torch.logical_and(p == label, t == label).type_as(p),
+                    dim=1
+                )
+                for label in range(self.n_classes)
+            ])
+
+        return intersection
+
+    def _union(self, predicted, target):
+        try:
+            target, roi = target
+            p = torch.argmax(predicted, dim=1)
+            t = target.to(predicted.device)
+            union = torch.stack([
+                torch.stack([
+                    torch.sum(
+                        torch.logical_or(
+                            p_i[r_i] == label, t_i[r_i] == label
+                        ).type_as(p)
+                    )
+                    for label in range(self.n_classes)
+                ])
+                for p_i, t_i, r_i in zip(p, target, roi)
+            ])
+        except ValueError:
+            p = torch.flatten(torch.argmax(predicted, dim=1), start_dim=1)
+            t = torch.flatten(target, start_dim=1).to(predicted.device)
+            union = torch.stack([
+                torch.sum(
+                    torch.logical_or(p == label, t == label).type_as(p),
+                    dim=1
+                )
+                for label in range(self.n_classes)
+            ])
+
+        return union
+
+    def _sum_masks(self, predicted, target):
+        try:
+            target, roi = target
+            p = torch.argmax(predicted, dim=1)
+            t = target.to(predicted.device)
+            sum_pred = torch.stack([
+                torch.stack([
+                    torch.sum((p_i[r_i] == label).type_as(p))
+                    for label in range(self.n_classes)
+                ])
+                for p_i, r_i in zip(p, roi)
+            ])
+            sum_target = torch.stack([
+                torch.stack([
+                    torch.sum((t[r_i] == label).type_as(p))
+                    for label in range(self.n_classes)
+                ])
+                for t_i, r_i in zip(target, roi)
+            ])
+        except ValueError:
+            p = torch.flatten(torch.argmax(predicted, dim=1), start_dim=1)
+            t = torch.flatten(target, start_dim=1).to(predicted.device)
+            sum_pred = torch.stack([
+                torch.sum((p == label).type_as(p), dim=1)
+                for label in range(self.n_classes)
+            ])
+            sum_target = torch.stack([
+                torch.sum((t == label).type_as(p), dim=1)
+                for label in range(self.n_classes)
+            ])
+        return sum_pred, sum_target
+
+    def _dsc_loss(self, predicted, target):
+        intersection = self._intersection(predicted, target)
+        sum_pred, sum_target = self._sum_masks(predicted, target)
+        dsc_k = torch.nanmean(
+            2 * intersection / (sum_pred + sum_target), dim=0
+        )
         if len(dsc_k) > 0:
             dsc = 1 - torch.mean(dsc_k)
         else:
-            dsc = torch.mean(0. * p)
+            dsc = torch.mean(0. * predicted)
 
         return torch.clamp(dsc, 0., 1.)
 
     def _mean_iou(self, predicted, target):
-        try:
-            target, roi = target
-            p = torch.argmax(predicted, dim=1)[roi]
-            t = target[roi].to(predicted.device)
-        except ValueError:
-            p = torch.flatten(torch.argmax(predicted, dim=1), start_dim=1)
-            t = torch.flatten(target, start_dim=1).to(predicted.device)
-        intersection = torch.stack([
-            torch.sum(
-                torch.logical_and(p == label, t == label).type_as(p), dim=1
-            )
-            for label in range(self.n_classes)
-        ])
-        union = torch.stack([
-            torch.sum(
-                torch.logical_or(p == label, t == label).type_as(p), dim=1
-            )
-            for label in range(self.n_classes)
-        ])
-        miou_k = torch.mean(intersection / union, dim=0)
-        miou_k = miou_k[torch.logical_not(torch.isnan(miou_k))]
+        intersection = self._intersection(predicted, target)
+        union = self._union(predicted, target)
+        miou_k = torch.nanmean(intersection / union, dim=0)
         if len(miou_k) > 0:
             miou = 1 - torch.mean(miou_k)
         else:
-            miou = torch.mean(0. * p)
+            miou = torch.mean(0. * predicted)
 
         return torch.clamp(miou, 0., 1.)
 
