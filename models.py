@@ -99,11 +99,9 @@ class Segmenter(BaseModel):
     def _cross_entropy(self, predicted, target):
         try:
             target, roi = target
-            print(predicted.shape, target.shape)
-            roi_channels = roi.unsqueeze(1).repeat(
-                1, predicted.shape[1], 1, 1
-            )
-            predicted = predicted[roi_channels]
+            predicted = torch.cat([
+                p_i[roi] for p_i in torch.split(predicted, dim=1)
+            ])
             target = target[roi]
         except ValueError:
             pass
