@@ -181,7 +181,7 @@ class Segmenter(BaseModel):
             ])
             sum_target = torch.stack([
                 torch.stack([
-                    torch.sum((t[r_i] == label).type_as(p))
+                    torch.sum((t_i[r_i] == label).type_as(p))
                     for label in range(self.n_classes)
                 ])
                 for t_i, r_i in zip(target, roi)
