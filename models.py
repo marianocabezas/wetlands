@@ -97,6 +97,7 @@ class Segmenter(BaseModel):
         ]
 
     def _cross_entropy(self, predicted, target):
+        print(predicted.shape, target.shape)
         try:
             target, roi = target
             roi_channels = roi.unsqueeze(1).repeat(
@@ -106,6 +107,8 @@ class Segmenter(BaseModel):
             target = target[roi]
         except ValueError:
             pass
+
+        print(predicted.shape, target.shape)
 
         return F.cross_entropy(predicted, target)
 
