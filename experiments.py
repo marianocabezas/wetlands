@@ -47,7 +47,7 @@ def attribution(x, attr_m, *args, **kwargs):
 def run_segmentation_experiments(
     master_seed, network_name, display_name, experiment_name, network_f,
     training_set, validation_set, testing_data, weight_path, maps_path,
-    classes=None, patch_size=256, epochs=10, patience=5, n_seeds=30,
+    classes=None, patch_size=None, epochs=10, patience=5, n_seeds=30,
     n_inputs=3, n_classes=2, train_batch=20, test_batch=50, verbose=1
 ):
     # Init
@@ -101,11 +101,18 @@ def run_segmentation_experiments(
         validation_loader = DataLoader(
             validation_set, test_batch
         )
-        model_path = os.path.join(
-            weight_path, '{:}-balanced_s{:05d}_p{:03d}.pt'.format(
-                network_name, seed, patch_size
+        if patch_size is None:
+            model_path = os.path.join(
+                weight_path, '{:}-balanced_s{:05d}.pt'.format(
+                    network_name, seed
+                )
             )
-        )
+        else:
+            model_path = os.path.join(
+                weight_path, '{:}-balanced_s{:05d}_p{:03d}.pt'.format(
+                    network_name, seed, patch_size
+                )
+            )
 
         # For efficiency, we only run the code once. If the weights are
         # stored on disk, we do not need to train again.
@@ -141,10 +148,18 @@ def run_segmentation_experiments(
             mosaic_class_dsc = []
             # Intermediate buffers for class metrics.
             for input_mosaic, mask_i in zip(testing_mosaics, testing_masks):
-                pred_map = net.patch_inference(
-                    normalise(input_mosaic).astype(np.float32),
-                    patch_size, test_batch
-                )
+                if patch_size is None:
+                    pred_map = net.inference(
+                        np.expand_dims(
+                            normalise(input_mosaic).astype(np.float32),
+                            axis=0
+                        )
+                    )[0]
+                else:
+                    pred_map = net.patch_inference(
+                        normalise(input_mosaic).astype(np.float32),
+                        patch_size, test_batch
+                    )
 
                 pred_y = np.argmax(pred_map, axis=0).astype(np.uint8)
                 y = mask_i.astype(np.uint8)
@@ -267,7 +282,7 @@ def run_segmentation_experiments(
 def run_classification_experiments(
     master_seed, network_name, display_name, name, network,
     training_set, testing_set, weight_path, classes=None,
-    patch_size=256, epochs=10, patience=5, n_seeds=30, n_classes=2,
+    epochs=10, patience=5, n_seeds=30, n_classes=2,
     train_batch=20, test_batch=50, verbose=1
 ):
     # Choosing random runs.
@@ -328,8 +343,8 @@ def run_classification_experiments(
         )
         model_path = os.path.join(
             weight_path,
-            '{:}-balanced_s{:05d}_p{:03d}.pt'.format(
-                network_name, seed, patch_size
+            '{:}-balanced_s{:05d}.pt'.format(
+                network_name, seed
             )
         )
 
@@ -457,7 +472,7 @@ def run_classification_experiments(
 
 def run_attribution_experiments(
     master_seed, network_name, network, testing_files, weight_path, maps_path,
-    patch_size=256, n_seeds=30, n_classes=2, saliency_batch=4, verbose=1
+    n_seeds=30, n_classes=2, saliency_batch=4, verbose=1
 ):
     # Choosing random runs.
     np.random.seed(master_seed)
@@ -469,8 +484,8 @@ def run_attribution_experiments(
     for test_n, seed in enumerate(seeds):
         model_path = os.path.join(
             weight_path,
-            '{:}-balanced_s{:05d}_p{:03d}.pt'.format(
-                network_name, seed, patch_size
+            '{:}-balanced_s{:05d}.pt'.format(
+                network_name, seed
             )
         )
         net = network(n_outputs=n_classes)
@@ -504,84 +519,85 @@ def run_attribution_experiments(
         # While we could modify the datasets to also return coordinates and
         # hide the following code, we leave it here to show how the data is
         # loaded.
-        for f, file in enumerate(testing_files):
-            quadrant = file.split('_')[-1]
-            saliency_set = RumexTestDataset(path, [file], patch_size)
-            xmlfile = file + '.xml'
-            imfile = file + '.png'
-            root = et.parse(os.path.join(path, xmlfile)).getroot()
-            xmlstr = et.tostring(root, encoding='utf-8', method='xml')
-            xmldict = dict(xmltodict.parse(xmlstr))
-            im_size = xmldict['annotation']['size']
-            im_height = int(im_size['height'])
-            im_width = int(im_size['width'])
 
-            npatches_w = int(np.ceil(im_width / patch_size))
-            npatches_h = int(np.ceil(im_height / patch_size))
-            new_w = npatches_w * patch_size
-            new_h = npatches_h * patch_size
-            alpha = skio.imread(os.path.join(path, imfile))[..., 3]
-
-            saliency_loader = DataLoader(saliency_set, saliency_batch)
-
-            # Attribution loop.
-            # We need to run each attribution method independently. The parameters
-            # for these methods need to be defined on the "method list".
-            for attr_m, attr_name, attr_channels, attr_args in methods:
-                if attr_channels > 1:
-                    heatmap = np.zeros(
-                        (attr_channels, new_h, new_w), dtype=np.uint8
-                    )
-                else:
-                    heatmap = np.zeros((new_h, new_w))
-                for i, (x, y, patch_coords) in enumerate(saliency_loader):
-                    time_elapsed = time.time() - init_start
-                    runs_left = (len(seeds) - (test_n + 1))
-                    eta = runs_left * time_elapsed / (test_n + 1)
-                    if verbose > 0:
-                        print(' '.join([' '] * 300), end='\r')
-                        print(
-                            '\033[KGenerating {:} map (batch {:d}/{:d} | '
-                            'seed {:05d} [{:02d}/{:02d}]) {:} ETA {:}'.format(
-                                attr_name, i + 1, len(saliency_loader),
-                                seed, test_n + 1, len(seeds),
-                                time_to_string(time_elapsed),
-                                time_to_string(eta),
-                            ), end='\r'
-                        )
-                    map_path = os.path.join(
-                        maps_path, '{:}-balanced_s{:05d}_{:}_{:}.png'.format(
-                            network_name, seed, attr_name, quadrant
-                        )
-                    )
-                    (ini_i_lst, end_i_lst), (ini_j_lst, end_j_lst) = patch_coords
-                    y = y.numpy().astype(np.uint8)
-                    x_cuda = x.to(net.device)
-                    x_cuda.requires_grad_()
-                    pred_y = np.argmax(
-                        net.inference(x.numpy()), axis=1
-                    ).astype(np.uint8)
-                    if attr_args is not None:
-                        maps = attribution(x_cuda, attr_m(net), attr_args)
-                    else:
-                        maps = attribution(x_cuda, attr_m(net))
-                    for ini_i, end_i, ini_j, end_j, map_k, k in zip(
-                        ini_i_lst, end_i_lst, ini_j_lst, end_j_lst, maps, pred_y
-                    ):
-                        if k == 1:
-                            if attr_channels > 1:
-                                heatmap[:, ini_i:end_i, ini_j:end_j] = map_k
-                            else:
-                                heatmap[ini_i:end_i, ini_j:end_j] = map_k
-                if attr_channels > 1:
-                    final_map = np.moveaxis(
-                        heatmap[:, :im_height, :im_width], 0, -1
-                    )
-                    final_map[alpha == 0, :] = 0
-                else:
-                    final_map = heatmap[:im_height, :im_width]
-                    final_map[alpha == 0] = 0
-                skio.imsave(map_path, final_map.astype(np.uint8))
+        # for f, file in enumerate(testing_files):
+        #     quadrant = file.split('_')[-1]
+        #     saliency_set = RumexTestDataset(path, [file], patch_size)
+        #     xmlfile = file + '.xml'
+        #     imfile = file + '.png'
+        #     root = et.parse(os.path.join(path, xmlfile)).getroot()
+        #     xmlstr = et.tostring(root, encoding='utf-8', method='xml')
+        #     xmldict = dict(xmltodict.parse(xmlstr))
+        #     im_size = xmldict['annotation']['size']
+        #     im_height = int(im_size['height'])
+        #     im_width = int(im_size['width'])
+        #
+        #     npatches_w = int(np.ceil(im_width / patch_size))
+        #     npatches_h = int(np.ceil(im_height / patch_size))
+        #     new_w = npatches_w * patch_size
+        #     new_h = npatches_h * patch_size
+        #     alpha = skio.imread(os.path.join(path, imfile))[..., 3]
+        #
+        #     saliency_loader = DataLoader(saliency_set, saliency_batch)
+        #
+        #     # Attribution loop.
+        #     # We need to run each attribution method independently. The parameters
+        #     # for these methods need to be defined on the "method list".
+        #     for attr_m, attr_name, attr_channels, attr_args in methods:
+        #         if attr_channels > 1:
+        #             heatmap = np.zeros(
+        #                 (attr_channels, new_h, new_w), dtype=np.uint8
+        #             )
+        #         else:
+        #             heatmap = np.zeros((new_h, new_w))
+        #         for i, (x, y, patch_coords) in enumerate(saliency_loader):
+        #             time_elapsed = time.time() - init_start
+        #             runs_left = (len(seeds) - (test_n + 1))
+        #             eta = runs_left * time_elapsed / (test_n + 1)
+        #             if verbose > 0:
+        #                 print(' '.join([' '] * 300), end='\r')
+        #                 print(
+        #                     '\033[KGenerating {:} map (batch {:d}/{:d} | '
+        #                     'seed {:05d} [{:02d}/{:02d}]) {:} ETA {:}'.format(
+        #                         attr_name, i + 1, len(saliency_loader),
+        #                         seed, test_n + 1, len(seeds),
+        #                         time_to_string(time_elapsed),
+        #                         time_to_string(eta),
+        #                     ), end='\r'
+        #                 )
+        #             map_path = os.path.join(
+        #                 maps_path, '{:}-balanced_s{:05d}_{:}_{:}.png'.format(
+        #                     network_name, seed, attr_name, quadrant
+        #                 )
+        #             )
+        #             (ini_i_lst, end_i_lst), (ini_j_lst, end_j_lst) = patch_coords
+        #             y = y.numpy().astype(np.uint8)
+        #             x_cuda = x.to(net.device)
+        #             x_cuda.requires_grad_()
+        #             pred_y = np.argmax(
+        #                 net.inference(x.numpy()), axis=1
+        #             ).astype(np.uint8)
+        #             if attr_args is not None:
+        #                 maps = attribution(x_cuda, attr_m(net), attr_args)
+        #             else:
+        #                 maps = attribution(x_cuda, attr_m(net))
+        #             for ini_i, end_i, ini_j, end_j, map_k, k in zip(
+        #                 ini_i_lst, end_i_lst, ini_j_lst, end_j_lst, maps, pred_y
+        #             ):
+        #                 if k == 1:
+        #                     if attr_channels > 1:
+        #                         heatmap[:, ini_i:end_i, ini_j:end_j] = map_k
+        #                     else:
+        #                         heatmap[ini_i:end_i, ini_j:end_j] = map_k
+        #         if attr_channels > 1:
+        #             final_map = np.moveaxis(
+        #                 heatmap[:, :im_height, :im_width], 0, -1
+        #             )
+        #             final_map[alpha == 0, :] = 0
+        #         else:
+        #             final_map = heatmap[:im_height, :im_width]
+        #             final_map[alpha == 0] = 0
+        #         skio.imsave(map_path, final_map.astype(np.uint8))
         net = None
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()
