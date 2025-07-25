@@ -1,14 +1,17 @@
 import os
 import itertools
-import xmltodict
+#import xmltodict
 import numpy as np
 from copy import deepcopy
 from itertools import product
-import xml.etree.ElementTree as et
+#import xml.etree.ElementTree as et
 from skimage import io as skio
 from skimage.util.shape import view_as_blocks
 from torch.utils.data.dataset import Dataset
-from utils import  normalise
+from utils import  normalise, gtFromPath
+
+
+import cv2
 
 
 ''' Utility function for patch creation '''
@@ -105,6 +108,36 @@ def get_slices(masks, patch_size, overlap):
 '''
 Dataset classes
 '''
+class FetalDataset(Dataset):
+    """
+    Dataset that walks a folder,
+    creates all label images if 
+    they did not exist and store
+    images and labels,
+    needs a dictionary indicating the 
+    layers of interest as well as those that are areas
+    the US image should be the layer in the final position
+    """
+    def __init__(self, path, lDict):
+        self.labelImList = []
+        self.usImageList = []
+        for root, _, files in os.walk(path):
+            for f in files:    
+                labelIm , usIm = gtFromPath(os.path.join(root, f), lDict)
+                self.labelImList.append(labelIm)
+                self.usImageList.append(usIm)
+
+
+    def __getitem__(self, index):
+        x = self.usImageList[index].astype(np.float32)
+        target = self.labelImList[index].astype(np.uint8)
+
+        return x, target
+
+    def __len__(self):
+        return len(self.usImageList)
+
+
 
 
 # Rumex detection dataset
@@ -569,3 +602,5 @@ class BalancedImagesDataset(ImagesDataset):
 
     def __len__(self):
         return self.minimum_count * len(self.classes)
+
+

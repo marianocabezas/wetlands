@@ -90,3 +90,5 @@ ENV/
 
 # pyCharm
 .idea/
+
+data

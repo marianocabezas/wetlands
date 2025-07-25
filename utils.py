@@ -6,11 +6,12 @@ import traceback
 from functools import reduce
 from scipy import ndimage as nd
 import numpy as np
-from nibabel import load as load_nii
+#from nibabel import load as load_nii
 from scipy.ndimage.morphology import binary_dilation as imdilate
 from scipy.ndimage.morphology import binary_erosion as imerode
 import torch
-
+import cv2
+from gimpformats.gimpXcfDocument import GimpDocument
 
 """
 Utility functions
@@ -171,3 +172,63 @@ def normalise(image):
     im_std = np.std(image, axis=(1, 2), keepdims=True)
 
     return (image - im_mean) / im_std
+
+# Fetal US images utility functions
+def load_xcf(path):
+    """
+        Read an image plus annotations 
+        and return 
+    """
+    project = GimpDocument(path)
+    layers = project.raw_layers
+    names, data = zip(*[
+        (layer.name, layer.image) for layer in layers
+        if not layer.isGroup
+    ])
+    return names, data
+
+def curveToMask(image):
+    """
+    Convert a PIL image of a closed contour to a filled binary mask.
+    """
+    gray = np.array(image.convert("L"))  # Grayscale array
+    contours, _ = cv2.findContours(gray, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    mask = np.zeros_like(gray, dtype=np.uint8)  # Empty mask
+    cv2.drawContours(mask, contours, -1, 255, cv2.FILLED)  # Fill contours
+    return mask.astype(bool)  # Return boolean mask
+
+def gtFromPath(path, layerDict):
+    """
+    Load XCF layers and create a label mask based on layerDict.
+
+    Also returns the main image
+
+    """
+    names, images = load_xcf(path)
+    retMask = None
+    finalImage = None
+
+    for name, im in zip(names, images):
+        try:
+            code, isArea = layerDict[name]
+        except KeyError:
+            #print(f"Ignoring layer {name}")
+            continue
+
+        if isArea:
+            # Fill closed curves with OpenCV
+            mask_to_use = curveToMask(im)
+        else:
+            # Grayscale and threshold nonzero pixels
+            im_gray = im.convert("L")
+            im_arr = np.array(im_gray)
+            mask_to_use = im_arr != 0
+
+        if retMask is None:
+            retMask = np.zeros(mask_to_use.shape, dtype=np.uint8)
+
+        retMask[mask_to_use] = code
+
+    return retMask, np.array(images[-1].convert("L"))
+
+
