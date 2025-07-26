@@ -7,9 +7,10 @@ from itertools import product
 #import xml.etree.ElementTree as et
 from skimage import io as skio
 from skimage.util.shape import view_as_blocks
+import torch
 from torch.utils.data.dataset import Dataset
 from utils import  normalise, gtFromPath
-
+from random import sample
 
 import cv2
 
@@ -121,18 +122,43 @@ class FetalDataset(Dataset):
     def __init__(self, path, lDict):
         self.labelImList = []
         self.usImageList = []
-        for root, _, files in os.walk(path):
-            for f in files:    
-                labelIm , usIm = gtFromPath(os.path.join(root, f), lDict)
-                self.labelImList.append(labelIm)
-                self.usImageList.append(usIm)
+        if path is not None:
+            for root, _, files in os.walk(path):
+                for f in files:    
+                    labelIm , usIm = gtFromPath(os.path.join(root, f), lDict)
+                    self.labelImList.append(labelIm)
+                    self.usImageList.append(usIm)
 
 
     def __getitem__(self, index):
         x = self.usImageList[index].astype(np.float32)
         target = self.labelImList[index].astype(np.uint8)
 
+        x = np.stack([x] * 3, axis=-1)  # (H, W, 3)
+
+        # Convert to CHW for PyTorch and to tensors
+        x = torch.from_numpy(x.transpose(2, 0, 1))  # (3, H, W)
+        target = torch.from_numpy(target)
+
         return x, target
+
+    #Create two dataset (training and validation) from an existing one, do a random split
+    def breakTrainValid(self,proportion):
+        train = FetalDataset(None, None)
+        valid = FetalDataset(None, None)
+
+        #randomly shuffle the data
+        toDivide = sample(list(zip(self.usImageList,self.labelImList)),len(self.usImageList))
+
+        for i in range(int(len(self)*proportion)):
+            valid.usImageList.append(toDivide[i][0].copy())
+            valid.labelImList.append(toDivide[i][1])
+
+        for i in range(int(len(self)*proportion)):
+            train.usImageList.append(toDivide[i][0].copy())
+            train.labelImList.append(toDivide[i][1])
+
+        return train,valid
 
     def __len__(self):
         return len(self.usImageList)
