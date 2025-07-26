@@ -138,8 +138,8 @@ class FetalDataset(Dataset):
 
         # Convert to CHW for PyTorch and to tensors
         x = torch.from_numpy(x.transpose(2, 0, 1))  # (3, H, W)
-        target = torch.from_numpy(target)
-
+        target = torch.from_numpy(target).long() 
+        
         return x, target
 
     #Create two dataset (training and validation) from an existing one, do a random split
