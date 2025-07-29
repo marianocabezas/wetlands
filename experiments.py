@@ -13,10 +13,12 @@ from scipy.special import expit, softmax
 import torch
 from torch.utils.data import DataLoader
 
+from pathlib import Path
+
 # attribution methods
-from captum.attr import IntegratedGradients, InputXGradient, DeepLift
-from captum.attr import Deconvolution, Occlusion
-from captum.attr import GuidedBackprop, GuidedGradCam, LayerGradCam
+#from captum.attr import IntegratedGradients, InputXGradient, DeepLift
+#from captum.attr import Deconvolution, Occlusion
+#from captum.attr import GuidedBackprop, GuidedGradCam, LayerGradCam
 
 # repository functions
 from utils import color_codes, normalise, time_to_string
@@ -42,6 +44,217 @@ def attribution(x, attr_m, *args, **kwargs):
         attr = F.interpolate(attr, size=x.size()[2:], mode='bilinear')
     attr_map = attr.squeeze().detach().cpu().numpy()
     return (attr_map * 255).astype(np.uint8)
+
+
+
+def run_segmentation_experiments_fetal(
+    master_seed, network_name, display_name, experiment_name, network_f, training_data, testing_data,
+    weight_path, maps_path, classes=None, epochs=10, patience=5,
+    n_seeds=30, n_inputs=3, n_classes=2, train_batch=4, test_batch=10, saliency_batch=4, verbose=1
+):
+    
+    training_set, validation_set = training_data.breakTrainValid(0.8)
+    testing_set = testing_data
+
+    # make paths if they did not exist
+    for d in [weight_path,maps_path]: Path(d).mkdir(parents=True, exist_ok=True)
+    
+    # Choosing random runs.
+    np.random.seed(master_seed)
+    seeds = np.random.randint(0, 100000, n_seeds)
+    c = color_codes()
+
+    dsc_list = []
+    class_dsc_list = []
+    # Main loop to run each independent random experiment.
+    for test_n, seed in enumerate(seeds):
+        acc = 0
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        
+        # The network will only be instantiated with the number of output classes
+        # (2 in this notebok). Therefore, networks that need extra parameters (like ViT)
+        # will need to be passed as a partial function.
+        net = network_f(n_inputs=n_inputs, n_outputs=n_classes)
+               
+        # This is a leftover from legacy code. If init is set to True (the default option),
+        # a first validation epoch will be run to determine the loss before training.
+        net.init = False
+        
+        # The number of parameters is only captured for debugging and printing.
+        n_param = sum(
+            p.numel() for p in net.parameters() if p.requires_grad
+        )
+
+        if verbose > 1:
+            print(
+                '{:}[{:}] {:}Starting experiment {:}(seed {:05d} - {:} {:}[{:,} parameters]{:})'
+                '{:} [{:02d}/{:02d}] {:}for {:} segmentation{:}'.format(
+                    c['clr'] + c['c'], strftime("%m/%d/%Y - %H:%M:%S"), c['g'],
+                    c['nc'] + c['y'], seed, c['b'] + display_name,
+                    c['nc'], n_param, c['y'],
+                    c['nc'] + c['c'], test_n + 1, len(seeds),
+                    c['nc'] + c['g'], c['b'] + experiment_name + c['nc'] + c['g'], c['nc']
+                )
+            )
+        
+        training_loader = DataLoader(
+            training_set, train_batch, True
+        )
+        validation_loader = DataLoader(
+            validation_set, test_batch
+        )
+        model_path = os.path.join(
+            weight_path, '{:}-balanced_s{:05d}_p.pt'.format(network_name, seed)
+        )
+        
+        # For efficiency, we only run the code once. If the weights are
+        # stored on disk, we do not need to train again.
+        try:
+            net.load_model(model_path)
+        except IOError:
+            net.train()
+            print(''.join([' '] * 200), end='\r')
+            net.fit(training_loader, validation_loader, epochs=epochs, patience=patience)
+            net.save_model(model_path)
+        
+        if verbose > 2:
+            print(''.join([' '] * 200), end='\r')
+            print(
+                '{:}[{:}] {:}Testing {:}(seed {:05d}){:} [{:02d}/{:02d}] '
+                '{:}for {:} segmentation <{:03d} samples>{:}'.format(
+                    c['clr'] + c['c'], strftime("%m/%d/%Y - %H:%M:%S"), c['g'],
+                    c['nc'] + c['y'], seed, c['nc'] + c['c'], test_n + 1, len(seeds),
+                    c['nc'] + c['g'], c['b'] + experiment_name + c['nc'] + c['g'], 
+                    len(training_set), c['nc']
+                )
+            )
+        
+        # Metric evaluation.
+        net.eval()
+        with torch.no_grad():
+            mosaic_dsc = []
+            mosaic_class_dsc = []
+            # Intermediate buffers for class metrics.
+            #for input_mosaic, mask_i in zip(testing_mosaics, testing_masks):
+            for input_mosaic, mask_i in testing_data:
+                pred_map = net.inference(
+                    np.expand_dims(
+                        normalise(input_mosaic).astype(np.float32),
+                        axis=0
+                    )
+                )[0]
+            
+                pred_y = np.argmax(pred_map, axis=0).astype(np.uint8)
+                y = mask_i.astype(np.uint8)
+                intersection = np.stack([
+                    2 * np.sum(np.logical_and(pred_y == lab, y == lab))
+                    for lab in range(n_classes)
+                ])
+                card_pred_y = np.stack([
+                    np.sum(pred_y == lab) for lab in range(n_classes)
+                ])
+                card_y = np.stack([
+                    np.sum(y == lab) for lab in range(n_classes)
+                ])
+                dsc_k = intersection / (card_pred_y + card_y)
+                dsc = np.nanmean(dsc_k)
+                mosaic_dsc.append(dsc)
+                mosaic_class_dsc.append(dsc_k.tolist())
+
+                for i, map_i in enumerate(softmax(pred_map, axis=0)):
+                    map_path = os.path.join(
+                        maps_path, '{:}-balanced_s{:05d}_map_{:02d}.png'.format(
+                            network_name, seed, i
+                        )
+                    )
+                    final_map = (255 * map_i).astype(np.uint8)
+                    skio.imsave(map_path, final_map.astype(np.uint8))
+                map_path = os.path.join(
+                    maps_path, '{:}-balanced_s{:05d}_masks.png'.format(
+                        network_name, seed
+                    )
+                )
+                final_map = (255 * (pred_y / (n_classes - 1))).astype(np.uint8)
+                skio.imsave(map_path, final_map.astype(np.uint8))
+                
+                dsc = np.nanmean(mosaic_dsc, axis=0)
+                class_dsc = np.nanmean(mosaic_class_dsc, axis=0)
+        if verbose > 2:
+            print(''.join([' '] * 200), end='\r')
+            print(
+                '{:}[{:}] {:}DSC{:} (seed {:05d}){:} [{:02d}/{:02d}] {:}'
+                '{:5.3f}{:}'.format(
+                    c['clr'] + c['c'], strftime("%m/%d/%Y - %H:%M:%S"), c['g'],
+                    c['nc'] + c['y'], seed, c['nc'] + c['c'], test_n + 1, len(seeds),
+                    c['nc'] + c['b'], dsc, c['nc']
+                )
+            )
+
+            class_dsc_s = ', '.join([
+            '{:} {:5.3f}'.format(k, dsc_k)
+                for k, dsc_k in zip(classes, class_dsc)
+            ])
+            print(
+                '{:}[{:}] {:}Class DSC{:} (seed {:05d}){:} [{:02d}/{:02d}] {:}'.format(
+                    c['clr'] + c['c'], strftime("%m/%d/%Y - %H:%M:%S"), c['g'],
+                    c['nc'] + c['y'], seed, c['nc'] + c['c'], test_n + 1, len(seeds),
+                    c['nc'] + c['b'] + class_dsc_s + c['nc']
+                )
+            )
+        elif verbose > 1:
+            print(''.join([' '] * 200), end='\r')
+            print(
+                '{:}Seed {:05d} {:} [{:,} parameters] '
+                '{:}[{:02d}/{:02d}] {:} {:5.3f}{:}'.format(
+                    c['y'], seed, c['b'] + display_name + c['nc'], n_param,
+                    c['c'], test_n + 1, len(seeds),
+                    c['nc'] + c['g'] + c['b'] + experiment_name + c['nc'] + c['b'],
+                    dsc, c['nc']
+                )
+            )
+        elif verbose > 0:
+            print(''.join([' '] * 200), end='\r')
+            print(
+                '{:}Seed {:05d} {:} [{:,} parameters] '
+                '{:}[{:02d}/{:02d}] {:} {:5.3f}{:}'.format(
+                    c['y'], seed, c['b'] + display_name + c['nc'], n_param,
+                    c['c'], test_n + 1, len(seeds),
+                    c['nc'] + c['g'] + c['b'] + experiment_name + c['nc'] + c['b'],
+                    dsc, c['nc']
+                ), end='\r'
+            )
+        net = None
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+        dsc_list.append(mosaic_dsc)
+        class_dsc_list.append(mosaic_class_dsc)
+    
+    # Metrics for all the runs.
+    if verbose > 0:
+        print(''.join([' '] * 200), end='\r')
+        print(
+            '{:}[{:}] {:} Mean DSC{:} {:5.3f}{:}'.format(
+                c['clr'] + c['c'], strftime("%m/%d/%Y - %H:%M:%S"),
+                c['nc'] + c['y'] + c['b'] + display_name + c['nc'] + c['g'],
+                c['nc'] + c['b'], np.nanmean(dsc_list), c['nc']
+            )
+        )
+        class_dsc_s = ', '.join([
+            '{:} {:5.3f}'.format(k, dsc_k)
+            for k, dsc_k in zip(
+                classes, np.nanmean(class_dsc_list, axis=(0, 1))
+            )
+        ])
+        print(
+            '{:}[{:}] {:} Mean class DSC {:}'.format(
+                c['clr'] + c['c'], strftime("%m/%d/%Y - %H:%M:%S"), 
+                c['nc'] + c['y'] + c['b'] + display_name + c['nc'] + c['g'],
+                c['nc'] + c['b'] + class_dsc_s + c['nc']
+            )
+        )
+        
+    return dsc_list, class_dsc_list
 
 
 def run_segmentation_experiments(
@@ -622,3 +835,5 @@ def run_attribution_experiments(
                 )
             )
             skio.imsave(map_path, np.mean(map_list, axis=0).astype(np.uint8))
+
+

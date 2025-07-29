@@ -132,14 +132,11 @@ class FetalDataset(Dataset):
 
     def __getitem__(self, index):
         x = self.usImageList[index].astype(np.float32)
-        target = self.labelImList[index].astype(np.uint8)
+        target = self.labelImList[index].astype(np.int64)  # long = int64 in NumPy
 
-        x = np.stack([x] * 3, axis=-1)  # (H, W, 3)
+        # Stack along axis 0 to create (3, H, W) directly
+        x = np.stack([x] * 3, axis=0)
 
-        # Convert to CHW for PyTorch and to tensors
-        x = torch.from_numpy(x.transpose(2, 0, 1))  # (3, H, W)
-        target = torch.from_numpy(target).long() 
-        
         return x, target
 
     #Create two dataset (training and validation) from an existing one, do a random split
