@@ -150,18 +150,20 @@ class FetalDataset(Dataset):
         train = FetalDataset(None, None)
         valid = FetalDataset(None, None)
 
+        toDivide = sample(list(zip(self.usImageList, self.labelImList)), len(self.usImageList))
+        
         #randomly shuffle the data
-        toDivide = sample(list(zip(self.usImageList,self.labelImList)),len(self.usImageList))
+        split_idx = int(len(self) * proportion)
 
-        for i in range(int(len(self)*proportion)):
+        for i in range(split_idx):
             valid.usImageList.append(toDivide[i][0].copy())
             valid.labelImList.append(toDivide[i][1])
 
-        for i in range(int(len(self)*proportion)):
+        for i in range(split_idx, len(self)):
             train.usImageList.append(toDivide[i][0].copy())
             train.labelImList.append(toDivide[i][1])
 
-        return train,valid
+            return train,valid
 
     def __len__(self):
         return len(self.usImageList)
