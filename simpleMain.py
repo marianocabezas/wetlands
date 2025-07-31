@@ -29,11 +29,13 @@ from pathlib import Path
 from datasets import FetalDataset
 from experiments  import run_segmentation_experiments_fetal
 
+import sys
 
 
 if __name__ == "__main__":
 
     os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+
 
     master_seed = 42
 
@@ -41,21 +43,28 @@ if __name__ == "__main__":
     test_batch = 8
     epochs = 50
     patience = 50
+    verbP = 1
     name = 'fetal us'
     classes = ['background', "third_sylvian", "third_midline", "third_cavum", "third_cerebellum"]
 
     d_path = "./data"
-    path_training = './data/training'
-    path_testing = './data/testing'
+    path_training = sys.argv[1]
+    path_testing = sys.argv[2]
+ 
+    gimpFormat = False # to see if the images were in gimp format or had already been separated
 
     lDict = {"third_sylvian" : (1,False), "third_midline": (2,False), "third_cavum": (3,True), "third_cerebellum":(4,True)} 
+    #lDict = {"third_sylvian" : (1,False), "third_midline": (2,False), "third_cavum": (3,False), "third_cerebellum":(4,False)}  # for only line segmentation
 
-    training_set = FetalDataset(path_training, lDict)
-    print
-    testing_set = FetalDataset(path_testing, lDict)
+    training_set = FetalDataset(path_training, gimpFormat = gimpFormat, lDict = lDict )
+    print("training data set made ")
+    testing_set = FetalDataset(path_testing, gimpFormat = gimpFormat, lDict = lDict)
+    print("testing data set made "+str(len(testing_set)))
     # The experiments are run next. We capture some warnings related to
     # image loading to clean the debugging console.
         
+    print("training unet")    
+
     # Unet [64, 64, 256, 256, 512, 512]
     unet_dsc, unet_k_dsc = run_segmentation_experiments_fetal(
         master_seed, 'unet2d', 'Unet 2D', name,
@@ -63,13 +72,14 @@ if __name__ == "__main__":
         training_set, testing_set, 
         os.path.join(d_path, 'Weights'), os.path.join(d_path, 'Predictions'),
         classes, n_inputs = 3, n_classes = 5, epochs=epochs, patience=patience,
-        train_batch=train_batch, test_batch=test_batch, verbose=1
+        train_batch=train_batch, test_batch=test_batch, verbose = verbP
     )
 
     print("FINISEHD UNET TRAINING, RESULTS: ")
     print(unet_dsc)
     print(unet_k_dsc)
     print("************************************************************************************* ")
+
 
     # FCN ResNet50
     fcn50_dsc, fcn50_k_dsc = run_segmentation_experiments_fetal(
@@ -78,7 +88,7 @@ if __name__ == "__main__":
         training_set, testing_set,
         os.path.join(d_path, 'Weights'), os.path.join(d_path, 'Predictions'),
         classes, n_inputs = 3, n_classes = 5, epochs=epochs, patience=patience,
-        train_batch=train_batch, test_batch=test_batch, verbose=1
+        train_batch=train_batch, test_batch=test_batch, verbose = verbP
     )
 
     print("FINISEHD FCN RESNET50 TRAINING, RESULTS: ")
@@ -86,6 +96,8 @@ if __name__ == "__main__":
     print(fcn50_k_dsc)
     print("************************************************************************************* ")
 
+    train_batch = 4
+    test_batch = 4
 
     # FCN ResNet101
     fcn101_dsc, fcn101_k_dsc = run_segmentation_experiments_fetal(
@@ -94,7 +106,7 @@ if __name__ == "__main__":
         training_set, testing_set,
         os.path.join(d_path, 'Weights'), os.path.join(d_path, 'Predictions'),
         classes, n_inputs = 3, n_classes = 5, epochs=epochs, patience=patience,
-        train_batch=train_batch, test_batch=test_batch, verbose=1
+        train_batch=train_batch, test_batch=test_batch, verbose = verbP
     )
 
     print("FINISEHD FCN RESNET50 TRAINING, RESULTS: ")
@@ -110,8 +122,14 @@ if __name__ == "__main__":
         training_set, testing_set,
         os.path.join(d_path, 'Weights'), os.path.join(d_path, 'Predictions'),
         classes, n_inputs = 3, n_classes = 5, epochs=epochs, patience=patience,
-        train_batch=train_batch, test_batch=test_batch, verbose=1
+        train_batch=train_batch, test_batch=test_batch, verbose = verbP
     )
+
+    print("FINISEHD DLMOB TRAINING, RESULTS: ")
+    print(dl3mn_dsc)
+    print(dl3mn_dsc)
+    print("************************************************************************************* ")
+
 
     # DeeplapV3 ResNet50
     dl3rn_dsc, dl3rn_k_dsc = run_segmentation_experiments_fetal(
@@ -120,8 +138,14 @@ if __name__ == "__main__":
         training_set, testing_set,
         os.path.join(d_path, 'Weights'), os.path.join(d_path, 'Predictions'),
         classes, n_inputs = 3, n_classes = 5, epochs=epochs, patience=patience,
-        train_batch=train_batch, test_batch=test_batch, verbose=1
+        train_batch=train_batch, test_batch=test_batch, verbose = verbP
     )
+
+    print("FINISEHD DL50 TRAINING, RESULTS: ")
+    print(dl3rn_dsc)
+    print(dl3rn_dsc)
+    print("************************************************************************************* ")
+
 
     # L-RASPP ResNet50
     lraspp_dsc, lraspp_k_dsc = run_segmentation_experiments_fetal(
@@ -130,5 +154,11 @@ if __name__ == "__main__":
         training_set, testing_set,
         os.path.join(d_path, 'Weights'), os.path.join(d_path, 'Predictions'),
         classes, n_inputs = 3, n_classes = 5, epochs=epochs, patience=patience,
-        train_batch=train_batch, test_batch=test_batch, verbose=1
+        train_batch=train_batch, test_batch=test_batch, verbose = verbP
     )
+
+
+    print("FINISEHD Lrasp TRAINING, RESULTS: ")
+    print(lraspp_dsc)
+    print(lraspp_k_dsc)
+    print("************************************************************************************* ")

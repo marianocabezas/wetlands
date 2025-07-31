@@ -119,15 +119,21 @@ class FetalDataset(Dataset):
     layers of interest as well as those that are areas
     the US image should be the layer in the final position
     """
-    def __init__(self, path, lDict):
+    def __init__(self, path, gimpFormat = True, lDict = {} ):
         self.labelImList = []
         self.usImageList = []
         if path is not None:
             for root, _, files in os.walk(path):
                 for f in files:    
-                    labelIm , usIm = gtFromPath(os.path.join(root, f), lDict)
-                    self.labelImList.append(labelIm)
-                    self.usImageList.append(usIm)
+                    if gimpFormat:
+                        labelIm , usIm = gtFromPath(os.path.join(root, f), lDict)
+                        self.labelImList.append(labelIm)
+                        self.usImageList.append(usIm)
+                    else: #images and labels have been separated previously
+                        if "segmentation" in f:
+                            self.labelImList.append(cv2.imread(os.path.join(root,f),cv2.IMREAD_UNCHANGED))
+                            name = f[:f.find("_")]
+                            self.usImageList.append(cv2.imread(os.path.join(root,name+".jpeg"),0))
 
 
     def __getitem__(self, index):

@@ -50,7 +50,7 @@ def attribution(x, attr_m, *args, **kwargs):
 def run_segmentation_experiments_fetal(
     master_seed, network_name, display_name, experiment_name, network_f, training_data, testing_data,
     weight_path, maps_path, classes=None, epochs=10, patience=5,
-    n_seeds=30, n_inputs=3, n_classes=2, train_batch=4, test_batch=10, saliency_batch=4, verbose=1
+    n_seeds=1, n_inputs=3, n_classes=2, train_batch=4, test_batch=10, saliency_batch=4, verbose=1
 ):
     
     training_set, validation_set = training_data.breakTrainValid(0.8)
