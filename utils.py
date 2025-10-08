@@ -206,7 +206,6 @@ def gtFromPath(path, layerDict):
     """
     names, images = load_xcf(path)
     retMask = None
-    finalImage = None
 
     for name, im in zip(names, images):
         try:
